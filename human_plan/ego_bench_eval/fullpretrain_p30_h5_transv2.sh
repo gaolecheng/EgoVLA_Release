@@ -35,8 +35,8 @@ echo $checkpoint_xxx
 # deepspeed human_plan/train/train_vla_finetune_llava.py \
 
 #1.改用isaaclab的启动脚本进行启动
-#/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p human_plan/ego_bench_eval/ik_agent_30hz.py \
-/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p -m debugpy --listen 5678 --wait-for-client human_plan/ego_bench_eval/ik_agent_30hz.py \
+#/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p -m debugpy --listen 5678 --wait-for-client human_plan/ego_bench_eval/ik_agent_30hz.py \
+/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p human_plan/ego_bench_eval/ik_agent_30hz.py \
     --model_name_or_path $checkpoint_xxx \
     --version qwen2 \
     --vision_tower google/siglip-so400m-patch14-384 \
@@ -126,7 +126,7 @@ echo $checkpoint_xxx
     --project_trajs $PROJ_TRAJS \
     --hand_smooth_weight $HAND_SMOOTH_WEIGHT \
     --video_saving_path $video_saving_path \
-    --additional_label $additional_label 
+    --additional_label $additional_label \
     --save_input_obs $SAVE_INPUT_OBS \
     --input_obs_stride $INPUT_OBS_STRIDE \
     --input_obs_max $INPUT_OBS_MAX \

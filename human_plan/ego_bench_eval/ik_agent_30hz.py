@@ -45,8 +45,8 @@ parser.add_argument("--additional_label", type=str, default=None, help="addition
 # 1.用来获取图像，20260318
 parser.add_argument("--save_input_obs", type=int, default=0, help="whether to save raw input observations")
 parser.add_argument("--input_obs_stride", type=int, default=10, help="save one input frame every N env steps")
-parser.add_argument("--input_obs_max", type=int, default=200, help="maximum number of input frames to save per trial")
-parser.add_argument("--input_obs_dir", type=str, default=None, help="optional root dir for saving input frames")
+parser.add_argument("--input_obs_max", type=int, default=120, help="maximum number of input frames to save per trial")
+parser.add_argument("--input_obs_dir", type=str, default="/home/ubuntu/Desktop/Egovla/EgoVLA_Release/observe_image", help="optional root dir for saving input frames")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
