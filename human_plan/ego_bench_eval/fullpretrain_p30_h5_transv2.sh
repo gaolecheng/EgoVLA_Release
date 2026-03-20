@@ -10,9 +10,15 @@ PROJ_TRAJS=$9
 HAND_SMOOTH_WEIGHT=${10}
 video_saving_path=${11}
 additional_label=${12}
-use_per_step_instruction=${13}
+# Optional debug args for saving model input observations.
+# Keep old behavior if these are not provided.
+SAVE_INPUT_OBS=${13}
+INPUT_OBS_STRIDE=${14}
+INPUT_OBS_MAX=${15}
+INPUT_OBS_DIR=${16}
+use_per_step_instruction=${17}
 
-source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
+#source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
 
 LOG_ROOT=logs
 
@@ -27,7 +33,10 @@ checkpoint_xxx=$(find checkpoints/$exp_id -type d -name "ckpt-*" -print -quit)
 echo $checkpoint_xxx
 
 # deepspeed human_plan/train/train_vla_finetune_llava.py \
-python human_plan/ego_bench_eval/ik_agent_30hz.py \
+
+#1.改用isaaclab的启动脚本进行启动
+#/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p human_plan/ego_bench_eval/ik_agent_30hz.py \
+/home/ubuntu/Desktop/IsaacLab/isaaclab.sh -p -m debugpy --listen 5678 --wait-for-client human_plan/ego_bench_eval/ik_agent_30hz.py \
     --model_name_or_path $checkpoint_xxx \
     --version qwen2 \
     --vision_tower google/siglip-so400m-patch14-384 \
@@ -118,3 +127,7 @@ python human_plan/ego_bench_eval/ik_agent_30hz.py \
     --hand_smooth_weight $HAND_SMOOTH_WEIGHT \
     --video_saving_path $video_saving_path \
     --additional_label $additional_label 
+    --save_input_obs $SAVE_INPUT_OBS \
+    --input_obs_stride $INPUT_OBS_STRIDE \
+    --input_obs_max $INPUT_OBS_MAX \
+    --input_obs_dir $INPUT_OBS_DIR

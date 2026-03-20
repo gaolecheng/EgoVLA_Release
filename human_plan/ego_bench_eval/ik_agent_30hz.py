@@ -42,6 +42,12 @@ parser.add_argument("--save_frames", type=int, default=0, help="result saving pa
 parser.add_argument("--project_trajs", type=int, default=0, help="result saving path")
 parser.add_argument("--additional_label", type=str, default=None, help="additional_label")
 
+# 1.用来获取图像，20260318
+parser.add_argument("--save_input_obs", type=int, default=0, help="whether to save raw input observations")
+parser.add_argument("--input_obs_stride", type=int, default=10, help="save one input frame every N env steps")
+parser.add_argument("--input_obs_max", type=int, default=200, help="maximum number of input frames to save per trial")
+parser.add_argument("--input_obs_dir", type=str, default=None, help="optional root dir for saving input frames")
+
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 
@@ -200,6 +206,21 @@ def main():
             f"{task_name}_room_{room_idx}_table_{table_idx}_episode_{episode_idx}_{trial_idx}"
           )
           Path(frames_output_path).mkdir(exist_ok=True, parents=True)
+
+        #Test
+        print("I have already run here")
+        print(task_args.save_input_obs)
+          
+        #2.同样为了获取图像，20260318
+        if task_args.save_input_obs:
+          input_obs_root = task_args.input_obs_dir if task_args.input_obs_dir is not None else seq_save_path
+          input_obs_output_path = os.path.join(
+            input_obs_root,
+            f"{task_name}_room_{room_idx}_table_{table_idx}_episode_{episode_idx}_{trial_idx}_input_obs"
+          )
+          Path(input_obs_output_path).mkdir(exist_ok=True, parents=True)
+          input_obs_saved_count = 0    
+
         fps = 15
         out = cv2.VideoWriter(
           output_path, 
@@ -261,6 +282,25 @@ def main():
           # run everything in inference mode
           # obtain quantities from simulation
           rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
+          
+          #3.在主循环中获取图像，20260318
+          if (
+            task_args.save_input_obs
+            and input_obs_saved_count < task_args.input_obs_max
+            and (i % max(1, task_args.input_obs_stride) == 0)
+          ):
+            print("开始录像了！")
+            rgb_obs_to_save = rgb_obs
+            if rgb_obs_to_save.dtype != np.uint8:
+              rgb_obs_to_save = np.clip(rgb_obs_to_save, 0.0, 255.0)
+              if rgb_obs_to_save.max() <= 1.0:
+                rgb_obs_to_save = rgb_obs_to_save * 255.0
+              rgb_obs_to_save = rgb_obs_to_save.astype(np.uint8)
+            cv2.imwrite(
+              os.path.join(input_obs_output_path, f"step_{i:04d}.jpg"),
+              rgb_obs_to_save[:, :, ::-1]
+            )
+            input_obs_saved_count += 1
 
           from human_plan.ego_bench_eval.utils import process_proprio_input
 
