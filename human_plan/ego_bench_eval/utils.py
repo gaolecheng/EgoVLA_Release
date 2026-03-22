@@ -240,7 +240,7 @@ def process_proprio_input(
     right_ee_pose_cam_frame, is_right=True
   )
   mano_kps3d_left = obtain_mano_pose_otv_inspire_single_step(
-    left_ee_pose_cam_frame, is_right=True
+    left_ee_pose_cam_frame, is_right=False
   )
 
   right_mano_ee_2d = project_points(
@@ -251,17 +251,18 @@ def process_proprio_input(
     left_ee_pose_cam_frame[:, :3, -1], cam_intrinsics
   )
 
-  mano_dof = infer_retarget_to_mano(
-      hand_mano_retarget_net, 
-      current_qpos
-  )
+  # mano_dof = infer_retarget_to_mano(
+  #     hand_mano_retarget_net, 
+  #     current_qpos
+  # )
+  # --- 将手部的30个参数先设置为0 ---
+  import numpy as np
+  mano_dof = np.zeros(30) # Feed it 30 zeros to simulate empty MANO hands
   mano_dof_left = mano_dof[:15]
   mano_dof_left = norm_hand_dof(torch.Tensor(mano_dof_left))
-  mano_dof_left = norm_hand_dof(mano_dof_left)
 
   mano_dof_right = mano_dof[15:]
   mano_dof_right = norm_hand_dof(torch.Tensor(mano_dof_right))
-  mano_dof_right = norm_hand_dof(mano_dof_right)
 
   current_proprio = {
     "left_hand_pose": {
@@ -324,12 +325,18 @@ def process_proprio_input(
     ], dim=-1)
 
   raw_proprio_inputs = current_proprio
+  # 创建一个 30 维的全 0 张量
+  padded_finger_tips = torch.zeros((finger_tip_inputs.shape[0], 30), device=finger_tip_inputs.device)
+  # 把 CURI 真实的 12 维数据塞进前 12 个位置，剩下的 18 个保持为 0
+  padded_finger_tips[:, :12] = finger_tip_inputs.reshape(-1, 12)
+
   raw_proprio_inputs.update({
     "proprio_input_2d": ee_2d_inputs.reshape(-1, 4),
     "proprio_input_3d": ee_3d_inputs.reshape(-1, 6),
     "proprio_input_rot": ee_rot_inputs.reshape(-1, 6),
     "proprio_input_handdof": hand_dof_inputs.reshape(-1, 30),
-    "proprio_input_hand_finger_tip": finger_tip_inputs.reshape(-1, 5 * 3 * 2)
+    #"proprio_input_hand_finger_tip": finger_tip_inputs.reshape(-1, 5 * 3 * 2)
+    "proprio_input_hand_finger_tip": padded_finger_tips  # 使用拼接后的真实数据
   })
   return proprio_input, raw_proprio_inputs
 
@@ -384,9 +391,10 @@ def ik_step(
   action[:, env.cfg.left_arm_cfg.joint_ids] = left_joint_pos_des
   action[:, env.cfg.right_arm_cfg.joint_ids] = right_joint_pos_des
 
-  action[:, env.cfg.left_hand_cfg.joint_ids] =  torch.FloatTensor(left_hand_dof).to(action.device)# set hand joint commands
-  action[:, env.cfg.right_hand_cfg.joint_ids] =  torch.FloatTensor(right_hand_dof).to(action.device)# set hand joint commands
-
+  # Keep grippers at robot default pose for stability in push-style tasks.
+  # This is robust to different hand joint counts (e.g. 2-DoF Franka gripper vs dexterous hands).
+  action[:, env.cfg.left_hand_cfg.joint_ids] = env.robot.data.default_joint_pos[:, env.cfg.left_hand_cfg.joint_ids]
+  action[:, env.cfg.right_hand_cfg.joint_ids] = env.robot.data.default_joint_pos[:, env.cfg.right_hand_cfg.joint_ids]
 
 
 from human_plan.vila_eval.utils.eval_func import (
