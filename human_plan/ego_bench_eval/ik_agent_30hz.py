@@ -47,6 +47,9 @@ parser.add_argument("--save_input_obs", type=int, default=0, help="whether to sa
 parser.add_argument("--input_obs_stride", type=int, default=10, help="save one input frame every N env steps")
 parser.add_argument("--input_obs_max", type=int, default=120, help="maximum number of input frames to save per trial")
 parser.add_argument("--input_obs_dir", type=str, default="/home/ubuntu/Desktop/Egovla/EgoVLA_Release/observe_image", help="optional root dir for saving input frames")
+parser.add_argument("--debug_ik", type=int, default=0, help="print IK tracking diagnostics")
+parser.add_argument("--debug_ik_stride", type=int, default=10, help="print diagnostics every N steps")
+parser.add_argument("--debug_ik_csv", type=str, default=None, help="optional directory for saving per-trial IK diagnostics csv")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -166,6 +169,15 @@ def main():
     hist_len = data_args.predict_future_step * data_args.future_index
 
     import numpy as np
+    def quat_angle_error_wxyz(q_curr, q_goal):
+      """Return geodesic quaternion angle (radians)."""
+      q_curr = np.asarray(q_curr, dtype=np.float64)
+      q_goal = np.asarray(q_goal, dtype=np.float64)
+      q_curr = q_curr / (np.linalg.norm(q_curr) + 1e-12)
+      q_goal = q_goal / (np.linalg.norm(q_goal) + 1e-12)
+      dot = np.clip(np.abs(np.dot(q_curr, q_goal)), -1.0, 1.0)
+      return 2.0 * np.arccos(dot)
+
     cam_intrinsics = np.array([
       [488.6662,   0.0000, 640.0000],
       [  0.0000, 488.6662, 360.0000],
@@ -275,6 +287,7 @@ def main():
         count = padding
 
         result = False
+        ik_debug_rows = []
         from human_plan.ego_bench_eval.utils import TASK_MAX_HORIZON
         max_horizon = TASK_MAX_HORIZON[task_args.task]
 
@@ -386,6 +399,57 @@ def main():
           )
           env_results = env.step(action)
 
+          if task_args.debug_ik:
+            left_curr = env_results[0]["left_ee_pose"][0].detach().cpu().numpy()
+            right_curr = env_results[0]["right_ee_pose"][0].detach().cpu().numpy()
+            left_goal = np.asarray(action_left_ee[:7], dtype=np.float64)
+            right_goal = np.asarray(action_right_ee[:7], dtype=np.float64)
+
+            left_pos_err = float(np.linalg.norm(left_curr[:3] - left_goal[:3]))
+            right_pos_err = float(np.linalg.norm(right_curr[:3] - right_goal[:3]))
+            left_rot_err_rad = float(quat_angle_error_wxyz(left_curr[3:7], left_goal[3:7]))
+            right_rot_err_rad = float(quat_angle_error_wxyz(right_curr[3:7], right_goal[3:7]))
+
+            qpos_now = env_results[0]["qpos"][0]
+            left_joint_ids = env.cfg.left_arm_cfg.joint_ids
+            right_joint_ids = env.cfg.right_arm_cfg.joint_ids
+            left_joint_track_err = float(torch.mean(torch.abs(action[0, left_joint_ids] - qpos_now[left_joint_ids])).item())
+            right_joint_track_err = float(torch.mean(torch.abs(action[0, right_joint_ids] - qpos_now[right_joint_ids])).item())
+
+            lower = env.robot_dof_lower_limits
+            upper = env.robot_dof_upper_limits
+            near_limit_eps = 1e-2
+            left_near_limit_ratio = float(torch.mean(
+              ((qpos_now[left_joint_ids] <= lower[left_joint_ids] + near_limit_eps) |
+               (qpos_now[left_joint_ids] >= upper[left_joint_ids] - near_limit_eps)).float()
+            ).item())
+            right_near_limit_ratio = float(torch.mean(
+              ((qpos_now[right_joint_ids] <= lower[right_joint_ids] + near_limit_eps) |
+               (qpos_now[right_joint_ids] >= upper[right_joint_ids] - near_limit_eps)).float()
+            ).item())
+
+            if i % max(1, task_args.debug_ik_stride) == 0:
+              print(
+                f"[IK-DEBUG] step={i} "
+                f"L_pos={left_pos_err:.4f}m L_rot={np.degrees(left_rot_err_rad):.2f}deg "
+                f"R_pos={right_pos_err:.4f}m R_rot={np.degrees(right_rot_err_rad):.2f}deg "
+                f"L_qerr={left_joint_track_err:.4f} R_qerr={right_joint_track_err:.4f} "
+                f"L_lim={left_near_limit_ratio:.2f} R_lim={right_near_limit_ratio:.2f}"
+              )
+
+            if task_args.debug_ik_csv is not None:
+              ik_debug_rows.append({
+                "step": i,
+                "left_pos_err_m": left_pos_err,
+                "left_rot_err_deg": float(np.degrees(left_rot_err_rad)),
+                "right_pos_err_m": right_pos_err,
+                "right_rot_err_deg": float(np.degrees(right_rot_err_rad)),
+                "left_joint_track_err": left_joint_track_err,
+                "right_joint_track_err": right_joint_track_err,
+                "left_near_limit_ratio": left_near_limit_ratio,
+                "right_near_limit_ratio": right_near_limit_ratio,
+              })
+
           # Success 
           if env_results[0]["success"].sum().item() == 1:
             result = True
@@ -435,6 +499,20 @@ def main():
               subtask_string += f"{key}: {env_results[0][key].sum().item()} "
           subtask_string += "\n"
           f.write(subtask_string)
+
+        if task_args.debug_ik and task_args.debug_ik_csv is not None and len(ik_debug_rows) > 0:
+          import csv
+          from pathlib import Path
+          Path(task_args.debug_ik_csv).mkdir(exist_ok=True, parents=True)
+          debug_csv_path = os.path.join(
+            task_args.debug_ik_csv,
+            f"{task_name}_room_{room_idx}_table_{table_idx}_episode_{episode_idx}_{trial_idx}_ik_debug.csv"
+          )
+          with open(debug_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(ik_debug_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(ik_debug_rows)
+          print(f"[IK-DEBUG] saved csv: {debug_csv_path}")
           
         out.release()
         # close the simulator
