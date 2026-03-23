@@ -17,6 +17,24 @@ INPUT_OBS_STRIDE=${14}
 INPUT_OBS_MAX=${15}
 INPUT_OBS_DIR=${16}
 use_per_step_instruction=${17}
+DEBUG_IK=${18}
+DEBUG_IK_STRIDE=${19}
+DEBUG_IK_CSV=${20}
+
+DEBUG_IK_ARG=""
+if [ -n "$DEBUG_IK" ]; then
+  DEBUG_IK_ARG="--debug_ik $DEBUG_IK"
+fi
+
+DEBUG_IK_STRIDE_ARG=""
+if [ -n "$DEBUG_IK_STRIDE" ]; then
+  DEBUG_IK_STRIDE_ARG="--debug_ik_stride $DEBUG_IK_STRIDE"
+fi
+
+DEBUG_IK_CSV_ARG=""
+if [ -n "$DEBUG_IK_CSV" ]; then
+  DEBUG_IK_CSV_ARG="--debug_ik_csv $DEBUG_IK_CSV"
+fi
 
 #source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
 
@@ -130,4 +148,7 @@ echo $checkpoint_xxx
     --save_input_obs $SAVE_INPUT_OBS \
     --input_obs_stride $INPUT_OBS_STRIDE \
     --input_obs_max $INPUT_OBS_MAX \
-    --input_obs_dir $INPUT_OBS_DIR
+    --input_obs_dir $INPUT_OBS_DIR \
+    $DEBUG_IK_ARG \
+    $DEBUG_IK_STRIDE_ARG \
+    $DEBUG_IK_CSV_ARG
