@@ -21,6 +21,16 @@ DEBUG_IK=${18}
 DEBUG_IK_STRIDE=${19}
 DEBUG_IK_CSV=${20}
 IK_IGNORE_ORIENTATION=${21}
+IK_ACTIVE_ARM=${22}
+ROBOT_BASE_X=${23}
+ROBOT_BASE_Y=${24}
+ROBOT_BASE_Z=${25}
+BOX_INIT_X=${26}
+BOX_INIT_Y=${27}
+BOX_INIT_Z=${28}
+GOAL_X=${29}
+GOAL_Y=${30}
+GOAL_Z=${31}
 
 DEBUG_IK_ARG=""
 if [ -n "$DEBUG_IK" ]; then
@@ -40,6 +50,48 @@ fi
 IK_IGNORE_ORIENTATION_ARG=""
 if [ -n "$IK_IGNORE_ORIENTATION" ]; then
   IK_IGNORE_ORIENTATION_ARG="--ik_ignore_orientation $IK_IGNORE_ORIENTATION"
+fi
+
+IK_ACTIVE_ARM_ARG=""
+if [ -n "$IK_ACTIVE_ARM" ]; then
+  IK_ACTIVE_ARM_ARG="--ik_active_arm $IK_ACTIVE_ARM"
+fi
+
+ROBOT_BASE_X_ARG=""
+if [ -n "$ROBOT_BASE_X" ]; then
+  ROBOT_BASE_X_ARG="--robot_base_x $ROBOT_BASE_X"
+fi
+ROBOT_BASE_Y_ARG=""
+if [ -n "$ROBOT_BASE_Y" ]; then
+  ROBOT_BASE_Y_ARG="--robot_base_y $ROBOT_BASE_Y"
+fi
+ROBOT_BASE_Z_ARG=""
+if [ -n "$ROBOT_BASE_Z" ]; then
+  ROBOT_BASE_Z_ARG="--robot_base_z $ROBOT_BASE_Z"
+fi
+BOX_INIT_X_ARG=""
+if [ -n "$BOX_INIT_X" ]; then
+  BOX_INIT_X_ARG="--box_init_x $BOX_INIT_X"
+fi
+BOX_INIT_Y_ARG=""
+if [ -n "$BOX_INIT_Y" ]; then
+  BOX_INIT_Y_ARG="--box_init_y $BOX_INIT_Y"
+fi
+BOX_INIT_Z_ARG=""
+if [ -n "$BOX_INIT_Z" ]; then
+  BOX_INIT_Z_ARG="--box_init_z $BOX_INIT_Z"
+fi
+GOAL_X_ARG=""
+if [ -n "$GOAL_X" ]; then
+  GOAL_X_ARG="--goal_x $GOAL_X"
+fi
+GOAL_Y_ARG=""
+if [ -n "$GOAL_Y" ]; then
+  GOAL_Y_ARG="--goal_y $GOAL_Y"
+fi
+GOAL_Z_ARG=""
+if [ -n "$GOAL_Z" ]; then
+  GOAL_Z_ARG="--goal_z $GOAL_Z"
 fi
 
 #source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
@@ -158,4 +210,14 @@ echo $checkpoint_xxx
     $DEBUG_IK_ARG \
     $DEBUG_IK_STRIDE_ARG \
     $DEBUG_IK_CSV_ARG \
-    $IK_IGNORE_ORIENTATION_ARG
+    $IK_IGNORE_ORIENTATION_ARG \
+    $IK_ACTIVE_ARM_ARG \
+    $ROBOT_BASE_X_ARG \
+    $ROBOT_BASE_Y_ARG \
+    $ROBOT_BASE_Z_ARG \
+    $BOX_INIT_X_ARG \
+    $BOX_INIT_Y_ARG \
+    $BOX_INIT_Z_ARG \
+    $GOAL_X_ARG \
+    $GOAL_Y_ARG \
+    $GOAL_Z_ARG

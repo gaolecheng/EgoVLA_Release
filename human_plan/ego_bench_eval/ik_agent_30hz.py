@@ -56,6 +56,21 @@ parser.add_argument(
     default=1,
     help="if set to 1, ignore orientation targets in IK and prioritize EE position tracking",
 )
+parser.add_argument(
+    "--ik_active_arm",
+    type=str,
+    default="both",
+    help="active arm mode for IK: both, left, or right",
+)
+parser.add_argument("--robot_base_x", type=float, default=None, help="optional robot base x override in world frame")
+parser.add_argument("--robot_base_y", type=float, default=None, help="optional robot base y override in world frame")
+parser.add_argument("--robot_base_z", type=float, default=None, help="optional robot base z override in world frame")
+parser.add_argument("--box_init_x", type=float, default=None, help="optional push-box initial x override")
+parser.add_argument("--box_init_y", type=float, default=None, help="optional push-box initial y override")
+parser.add_argument("--box_init_z", type=float, default=None, help="optional push-box initial z override")
+parser.add_argument("--goal_x", type=float, default=None, help="optional push-box goal x override")
+parser.add_argument("--goal_y", type=float, default=None, help="optional push-box goal y override")
+parser.add_argument("--goal_z", type=float, default=None, help="optional push-box goal z override")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -122,6 +137,37 @@ def main():
         num_envs=1,
     )
 
+    # Optional workspace overrides for fast calibration without editing task files.
+    if any(v is not None for v in (task_args.robot_base_x, task_args.robot_base_y, task_args.robot_base_z)):
+      default_robot_pos = list(env_cfg.robot.init_state.pos)
+      robot_pos = (
+        task_args.robot_base_x if task_args.robot_base_x is not None else default_robot_pos[0],
+        task_args.robot_base_y if task_args.robot_base_y is not None else default_robot_pos[1],
+        task_args.robot_base_z if task_args.robot_base_z is not None else default_robot_pos[2],
+      )
+      env_cfg.robot.init_state.pos = robot_pos
+      print(f"[WS] robot base override: {robot_pos}")
+
+    if hasattr(env_cfg, "box") and any(v is not None for v in (task_args.box_init_x, task_args.box_init_y, task_args.box_init_z)):
+      default_box_pos = list(env_cfg.box.init_state.pos)
+      box_pos = (
+        task_args.box_init_x if task_args.box_init_x is not None else default_box_pos[0],
+        task_args.box_init_y if task_args.box_init_y is not None else default_box_pos[1],
+        task_args.box_init_z if task_args.box_init_z is not None else default_box_pos[2],
+      )
+      env_cfg.box.init_state.pos = box_pos
+      print(f"[WS] box init override: {box_pos}")
+
+    if hasattr(env_cfg, "goal_default_pos") and any(v is not None for v in (task_args.goal_x, task_args.goal_y, task_args.goal_z)):
+      default_goal_pos = list(env_cfg.goal_default_pos)
+      goal_pos = (
+        task_args.goal_x if task_args.goal_x is not None else default_goal_pos[0],
+        task_args.goal_y if task_args.goal_y is not None else default_goal_pos[1],
+        task_args.goal_z if task_args.goal_z is not None else default_goal_pos[2],
+      )
+      env_cfg.goal_default_pos = goal_pos
+      print(f"[WS] goal override: {goal_pos}")
+
     env_cfg.episode_length_s = 60 # 60 seconds episode length -> For long horizon tasks
     env_cfg.randomize = True
     # create environment
@@ -137,6 +183,23 @@ def main():
     )
     env.cfg.randomize_idx = randomize_idxes[curr_random_idx]
     env.reset()
+
+    ik_active_arm = str(task_args.ik_active_arm).lower()
+    if ik_active_arm not in ("both", "left", "right"):
+      print(f"[IK] invalid --ik_active_arm={task_args.ik_active_arm}, fallback to 'both'")
+      ik_active_arm = "both"
+    print(
+      f"[IK] config: ignore_orientation={bool(task_args.ik_ignore_orientation)} "
+      f"active_arm={ik_active_arm}"
+    )
+    left_joint_ids = env.cfg.left_arm_cfg.joint_ids
+    right_joint_ids = env.cfg.right_arm_cfg.joint_ids
+    left_joint_names = list(getattr(env.cfg.left_arm_cfg, "joint_names", []))
+    right_joint_names = list(getattr(env.cfg.right_arm_cfg, "joint_names", []))
+    if len(left_joint_names) != len(left_joint_ids):
+      left_joint_names = [f"left_joint_{int(jid)}" for jid in left_joint_ids]
+    if len(right_joint_names) != len(right_joint_ids):
+      right_joint_names = [f"right_joint_{int(jid)}" for jid in right_joint_ids]
 
     # IK controllers
     command_type = "pose"
@@ -286,6 +349,7 @@ def main():
               left_dof, right_dof,
               action,
               ignore_orientation=bool(task_args.ik_ignore_orientation),
+              active_arm=ik_active_arm,
             )
             env_results = env.step(action)
             rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
@@ -404,6 +468,7 @@ def main():
 
               action,
               ignore_orientation=bool(task_args.ik_ignore_orientation),
+              active_arm=ik_active_arm,
           )
           env_results = env.step(action)
 
@@ -419,22 +484,39 @@ def main():
             right_rot_err_rad = float(quat_angle_error_wxyz(right_curr[3:7], right_goal[3:7]))
 
             qpos_now = env_results[0]["qpos"][0]
-            left_joint_ids = env.cfg.left_arm_cfg.joint_ids
-            right_joint_ids = env.cfg.right_arm_cfg.joint_ids
             left_joint_track_err = float(torch.mean(torch.abs(action[0, left_joint_ids] - qpos_now[left_joint_ids])).item())
             right_joint_track_err = float(torch.mean(torch.abs(action[0, right_joint_ids] - qpos_now[right_joint_ids])).item())
 
             lower = env.robot_dof_lower_limits
             upper = env.robot_dof_upper_limits
             near_limit_eps = 1e-2
-            left_near_limit_ratio = float(torch.mean(
-              ((qpos_now[left_joint_ids] <= lower[left_joint_ids] + near_limit_eps) |
-               (qpos_now[left_joint_ids] >= upper[left_joint_ids] - near_limit_eps)).float()
-            ).item())
-            right_near_limit_ratio = float(torch.mean(
-              ((qpos_now[right_joint_ids] <= lower[right_joint_ids] + near_limit_eps) |
-               (qpos_now[right_joint_ids] >= upper[right_joint_ids] - near_limit_eps)).float()
-            ).item())
+
+            left_q = qpos_now[left_joint_ids]
+            right_q = qpos_now[right_joint_ids]
+            left_lower_margin = left_q - lower[left_joint_ids]
+            left_upper_margin = upper[left_joint_ids] - left_q
+            right_lower_margin = right_q - lower[right_joint_ids]
+            right_upper_margin = upper[right_joint_ids] - right_q
+            left_margin = torch.minimum(left_lower_margin, left_upper_margin)
+            right_margin = torch.minimum(right_lower_margin, right_upper_margin)
+
+            left_near_mask = (left_lower_margin <= near_limit_eps) | (left_upper_margin <= near_limit_eps)
+            right_near_mask = (right_lower_margin <= near_limit_eps) | (right_upper_margin <= near_limit_eps)
+            left_near_limit_ratio = float(torch.mean(left_near_mask.float()).item())
+            right_near_limit_ratio = float(torch.mean(right_near_mask.float()).item())
+            left_near_limit_count = int(left_near_mask.sum().item())
+            right_near_limit_count = int(right_near_mask.sum().item())
+
+            left_worst_idx = int(torch.argmin(left_margin).item())
+            right_worst_idx = int(torch.argmin(right_margin).item())
+            left_worst_joint = left_joint_names[left_worst_idx]
+            right_worst_joint = right_joint_names[right_worst_idx]
+            left_worst_side = "lower" if float(left_lower_margin[left_worst_idx].item()) <= float(left_upper_margin[left_worst_idx].item()) else "upper"
+            right_worst_side = "lower" if float(right_lower_margin[right_worst_idx].item()) <= float(right_upper_margin[right_worst_idx].item()) else "upper"
+            left_min_margin = float(left_margin[left_worst_idx].item())
+            right_min_margin = float(right_margin[right_worst_idx].item())
+            left_margin_values = ";".join([f"{v:.6f}" for v in left_margin.detach().cpu().tolist()])
+            right_margin_values = ";".join([f"{v:.6f}" for v in right_margin.detach().cpu().tolist()])
 
             if i % max(1, task_args.debug_ik_stride) == 0:
               print(
@@ -442,7 +524,10 @@ def main():
                 f"L_pos={left_pos_err:.4f}m L_rot={np.degrees(left_rot_err_rad):.2f}deg "
                 f"R_pos={right_pos_err:.4f}m R_rot={np.degrees(right_rot_err_rad):.2f}deg "
                 f"L_qerr={left_joint_track_err:.4f} R_qerr={right_joint_track_err:.4f} "
-                f"L_lim={left_near_limit_ratio:.2f} R_lim={right_near_limit_ratio:.2f}"
+                f"L_lim={left_near_limit_ratio:.2f}({left_near_limit_count}) "
+                f"R_lim={right_near_limit_ratio:.2f}({right_near_limit_count}) "
+                f"L_worst={left_worst_joint}@{left_worst_side}:{left_min_margin:.4f} "
+                f"R_worst={right_worst_joint}@{right_worst_side}:{right_min_margin:.4f}"
               )
 
             if task_args.debug_ik_csv is not None:
@@ -456,6 +541,18 @@ def main():
                 "right_joint_track_err": right_joint_track_err,
                 "left_near_limit_ratio": left_near_limit_ratio,
                 "right_near_limit_ratio": right_near_limit_ratio,
+                "left_near_limit_count": left_near_limit_count,
+                "right_near_limit_count": right_near_limit_count,
+                "left_worst_joint": left_worst_joint,
+                "left_worst_side": left_worst_side,
+                "left_min_margin_rad": left_min_margin,
+                "right_worst_joint": right_worst_joint,
+                "right_worst_side": right_worst_side,
+                "right_min_margin_rad": right_min_margin,
+                "left_joint_margin_rad_list": left_margin_values,
+                "right_joint_margin_rad_list": right_margin_values,
+                "ik_ignore_orientation": int(task_args.ik_ignore_orientation),
+                "ik_active_arm": ik_active_arm,
               })
 
           # Success 

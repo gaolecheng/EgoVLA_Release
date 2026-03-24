@@ -356,6 +356,7 @@ def ik_step(
     
     action,
     ignore_orientation=False,
+    active_arm="both",
 ):
   left_jacobin_idx = env.left_ee_idx-1
   right_jacobin_idx = env.right_ee_idx-1
@@ -402,8 +403,21 @@ def ik_step(
   right_joint_pos_des = right_ik_controller.compute(right_ee_curr_pos_robot, right_ee_curr_quat_robot, right_arm_jacobian, right_joint_pos)
 
   action[:, :] = 0
-  action[:, env.cfg.left_arm_cfg.joint_ids] = left_joint_pos_des
-  action[:, env.cfg.right_arm_cfg.joint_ids] = right_joint_pos_des
+  active_arm = str(active_arm).lower()
+  if active_arm not in ("both", "left", "right"):
+    active_arm = "both"
+
+  if active_arm in ("both", "left"):
+    action[:, env.cfg.left_arm_cfg.joint_ids] = left_joint_pos_des
+  else:
+    # Freeze inactive arm at current pose for controlled single-arm diagnostics.
+    action[:, env.cfg.left_arm_cfg.joint_ids] = left_joint_pos
+
+  if active_arm in ("both", "right"):
+    action[:, env.cfg.right_arm_cfg.joint_ids] = right_joint_pos_des
+  else:
+    # Freeze inactive arm at current pose for controlled single-arm diagnostics.
+    action[:, env.cfg.right_arm_cfg.joint_ids] = right_joint_pos
 
   # Keep grippers at robot default pose for stability in push-style tasks.
   # This is robust to different hand joint counts (e.g. 2-DoF Franka gripper vs dexterous hands).
