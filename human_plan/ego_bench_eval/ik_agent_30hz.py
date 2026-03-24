@@ -50,6 +50,12 @@ parser.add_argument("--input_obs_dir", type=str, default="/home/ubuntu/Desktop/E
 parser.add_argument("--debug_ik", type=int, default=0, help="print IK tracking diagnostics")
 parser.add_argument("--debug_ik_stride", type=int, default=10, help="print diagnostics every N steps")
 parser.add_argument("--debug_ik_csv", type=str, default=None, help="optional directory for saving per-trial IK diagnostics csv")
+parser.add_argument(
+    "--ik_ignore_orientation",
+    type=int,
+    default=1,
+    help="if set to 1, ignore orientation targets in IK and prioritize EE position tracking",
+)
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -136,7 +142,7 @@ def main():
     command_type = "pose"
     left_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
     left_ik_controller = DifferentialIKController(left_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
-    right_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="pinv")
+    right_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
     right_ik_controller = DifferentialIKController(right_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
 
     # Create buffers to store actions
@@ -278,7 +284,8 @@ def main():
 
               left_ee_pose_traj_gt, right_ee_pose_traj_gt,
               left_dof, right_dof,
-              action
+              action,
+              ignore_orientation=bool(task_args.ik_ignore_orientation),
             )
             env_results = env.step(action)
             rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
@@ -395,7 +402,8 @@ def main():
               action_left_hand,
               action_right_hand,
 
-              action
+              action,
+              ignore_orientation=bool(task_args.ik_ignore_orientation),
           )
           env_results = env.step(action)
 

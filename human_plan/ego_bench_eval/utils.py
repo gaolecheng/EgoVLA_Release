@@ -354,7 +354,8 @@ def ik_step(
     left_ee_goal, right_ee_goal,
     left_hand_dof, right_hand_dof,
     
-    action
+    action,
+    ignore_orientation=False,
 ):
   left_jacobin_idx = env.left_ee_idx-1
   right_jacobin_idx = env.right_ee_idx-1
@@ -373,11 +374,24 @@ def ik_step(
   right_ee_curr_pos_robot, right_ee_curr_quat_robot = subtract_frame_transforms(
       robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], right_ee_curr_pose_world[:, 0:3], right_ee_curr_pose_world[:, 3:7]
   )
-  left_ik_commands_world[:, 0:7] = torch.FloatTensor(left_ee_goal[0:7]).to(left_ik_commands_world.device)
+  left_goal_world = torch.as_tensor(
+      left_ee_goal[0:7], dtype=left_ik_commands_world.dtype, device=left_ik_commands_world.device
+  )
+  right_goal_world = torch.as_tensor(
+      right_ee_goal[0:7], dtype=right_ik_commands_world.dtype, device=right_ik_commands_world.device
+  )
+
+  left_ik_commands_world[:, 0:7] = left_goal_world
+  right_ik_commands_world[:, 0:7] = right_goal_world
+
+  if ignore_orientation:
+    # For push-style tasks on swapped robots, position-only tracking is often more robust.
+    left_ik_commands_world[:, 3:7] = left_ee_curr_pose_world[:, 3:7]
+    right_ik_commands_world[:, 3:7] = right_ee_curr_pose_world[:, 3:7]
+
   left_ik_commands_robot[:, 0:3], left_ik_commands_robot[:, 3:7] = subtract_frame_transforms(
       robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], left_ik_commands_world[:, 0:3], left_ik_commands_world[:, 3:7]
   )
-  right_ik_commands_world[:, 0:7] = torch.FloatTensor(right_ee_goal[0:7]).to(right_ik_commands_world.device)
   right_ik_commands_robot[:, 0:3], right_ik_commands_robot[:, 3:7] = subtract_frame_transforms(
       robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], right_ik_commands_world[:, 0:3], right_ik_commands_world[:, 3:7]
   )

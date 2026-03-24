@@ -20,6 +20,7 @@ use_per_step_instruction=${17}
 DEBUG_IK=${18}
 DEBUG_IK_STRIDE=${19}
 DEBUG_IK_CSV=${20}
+IK_IGNORE_ORIENTATION=${21}
 
 DEBUG_IK_ARG=""
 if [ -n "$DEBUG_IK" ]; then
@@ -34,6 +35,11 @@ fi
 DEBUG_IK_CSV_ARG=""
 if [ -n "$DEBUG_IK_CSV" ]; then
   DEBUG_IK_CSV_ARG="--debug_ik_csv $DEBUG_IK_CSV"
+fi
+
+IK_IGNORE_ORIENTATION_ARG=""
+if [ -n "$IK_IGNORE_ORIENTATION" ]; then
+  IK_IGNORE_ORIENTATION_ARG="--ik_ignore_orientation $IK_IGNORE_ORIENTATION"
 fi
 
 #source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
@@ -151,4 +157,5 @@ echo $checkpoint_xxx
     --input_obs_dir $INPUT_OBS_DIR \
     $DEBUG_IK_ARG \
     $DEBUG_IK_STRIDE_ARG \
-    $DEBUG_IK_CSV_ARG
+    $DEBUG_IK_CSV_ARG \
+    $IK_IGNORE_ORIENTATION_ARG
