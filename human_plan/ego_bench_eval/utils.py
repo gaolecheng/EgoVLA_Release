@@ -357,7 +357,18 @@ def ik_step(
     action,
     ignore_orientation=False,
     active_arm="both",
+    tcp_offset_enable=False,
+    left_tcp_offset=(0.0, 0.0, 0.0),
+    right_tcp_offset=(0.0, 0.0, 0.0),
 ):
+  def quat_rotate_wxyz(q_wxyz: torch.Tensor, v_xyz: torch.Tensor) -> torch.Tensor:
+    """Rotate vector(s) by quaternion(s), both in batched tensor form."""
+    q = q_wxyz / (torch.linalg.norm(q_wxyz, dim=-1, keepdim=True) + 1e-12)
+    q_xyz = q[:, 1:4]
+    q_w = q[:, 0:1]
+    t = 2.0 * torch.cross(q_xyz, v_xyz, dim=-1)
+    return v_xyz + q_w * t + torch.cross(q_xyz, t, dim=-1)
+
   left_jacobin_idx = env.left_ee_idx-1
   right_jacobin_idx = env.right_ee_idx-1
 
@@ -389,6 +400,19 @@ def ik_step(
     # For push-style tasks on swapped robots, position-only tracking is often more robust.
     left_ik_commands_world[:, 3:7] = left_ee_curr_pose_world[:, 3:7]
     right_ik_commands_world[:, 3:7] = right_ee_curr_pose_world[:, 3:7]
+
+  if tcp_offset_enable:
+    left_offset_local = torch.as_tensor(
+        left_tcp_offset, dtype=left_ik_commands_world.dtype, device=left_ik_commands_world.device
+    ).reshape(1, 3).repeat(left_ik_commands_world.shape[0], 1)
+    right_offset_local = torch.as_tensor(
+        right_tcp_offset, dtype=right_ik_commands_world.dtype, device=right_ik_commands_world.device
+    ).reshape(1, 3).repeat(right_ik_commands_world.shape[0], 1)
+    # Convert desired TCP pose -> link7 command pose by subtracting rotated offset.
+    left_offset_world = quat_rotate_wxyz(left_ik_commands_world[:, 3:7], left_offset_local)
+    right_offset_world = quat_rotate_wxyz(right_ik_commands_world[:, 3:7], right_offset_local)
+    left_ik_commands_world[:, 0:3] -= left_offset_world
+    right_ik_commands_world[:, 0:3] -= right_offset_world
 
   left_ik_commands_robot[:, 0:3], left_ik_commands_robot[:, 3:7] = subtract_frame_transforms(
       robot_pose_w[:, 0:3], robot_pose_w[:, 3:7], left_ik_commands_world[:, 0:3], left_ik_commands_world[:, 3:7]

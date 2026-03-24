@@ -71,6 +71,13 @@ parser.add_argument("--box_init_z", type=float, default=None, help="optional pus
 parser.add_argument("--goal_x", type=float, default=None, help="optional push-box goal x override")
 parser.add_argument("--goal_y", type=float, default=None, help="optional push-box goal y override")
 parser.add_argument("--goal_z", type=float, default=None, help="optional push-box goal z override")
+parser.add_argument("--ik_tcp_offset_enable", type=int, default=1, help="enable TCP->link7 translational offset compensation")
+parser.add_argument("--ik_left_tcp_offset_x", type=float, default=0.0, help="left TCP offset x in link7 local frame")
+parser.add_argument("--ik_left_tcp_offset_y", type=float, default=0.0, help="left TCP offset y in link7 local frame")
+parser.add_argument("--ik_left_tcp_offset_z", type=float, default=0.1654, help="left TCP offset z in link7 local frame")
+parser.add_argument("--ik_right_tcp_offset_x", type=float, default=0.0, help="right TCP offset x in link7 local frame")
+parser.add_argument("--ik_right_tcp_offset_y", type=float, default=0.0, help="right TCP offset y in link7 local frame")
+parser.add_argument("--ik_right_tcp_offset_z", type=float, default=0.1654, help="right TCP offset z in link7 local frame")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -200,6 +207,20 @@ def main():
       left_joint_names = [f"left_joint_{int(jid)}" for jid in left_joint_ids]
     if len(right_joint_names) != len(right_joint_ids):
       right_joint_names = [f"right_joint_{int(jid)}" for jid in right_joint_ids]
+    left_tcp_offset = (
+      float(task_args.ik_left_tcp_offset_x),
+      float(task_args.ik_left_tcp_offset_y),
+      float(task_args.ik_left_tcp_offset_z),
+    )
+    right_tcp_offset = (
+      float(task_args.ik_right_tcp_offset_x),
+      float(task_args.ik_right_tcp_offset_y),
+      float(task_args.ik_right_tcp_offset_z),
+    )
+    print(
+      f"[IK] tcp_offset_enable={bool(task_args.ik_tcp_offset_enable)} "
+      f"left_offset={left_tcp_offset} right_offset={right_tcp_offset}"
+    )
 
     # IK controllers
     command_type = "pose"
@@ -350,6 +371,9 @@ def main():
               action,
               ignore_orientation=bool(task_args.ik_ignore_orientation),
               active_arm=ik_active_arm,
+              tcp_offset_enable=False,
+              left_tcp_offset=(0.0, 0.0, 0.0),
+              right_tcp_offset=(0.0, 0.0, 0.0),
             )
             env_results = env.step(action)
             rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
@@ -469,6 +493,9 @@ def main():
               action,
               ignore_orientation=bool(task_args.ik_ignore_orientation),
               active_arm=ik_active_arm,
+              tcp_offset_enable=bool(task_args.ik_tcp_offset_enable),
+              left_tcp_offset=left_tcp_offset,
+              right_tcp_offset=right_tcp_offset,
           )
           env_results = env.step(action)
 

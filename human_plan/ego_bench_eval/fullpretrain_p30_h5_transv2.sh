@@ -31,6 +31,13 @@ BOX_INIT_Z=${28}
 GOAL_X=${29}
 GOAL_Y=${30}
 GOAL_Z=${31}
+IK_TCP_OFFSET_ENABLE=${32}
+IK_LEFT_TCP_OFFSET_X=${33}
+IK_LEFT_TCP_OFFSET_Y=${34}
+IK_LEFT_TCP_OFFSET_Z=${35}
+IK_RIGHT_TCP_OFFSET_X=${36}
+IK_RIGHT_TCP_OFFSET_Y=${37}
+IK_RIGHT_TCP_OFFSET_Z=${38}
 
 DEBUG_IK_ARG=""
 if [ -n "$DEBUG_IK" ]; then
@@ -92,6 +99,35 @@ fi
 GOAL_Z_ARG=""
 if [ -n "$GOAL_Z" ]; then
   GOAL_Z_ARG="--goal_z $GOAL_Z"
+fi
+
+IK_TCP_OFFSET_ENABLE_ARG=""
+if [ -n "$IK_TCP_OFFSET_ENABLE" ]; then
+  IK_TCP_OFFSET_ENABLE_ARG="--ik_tcp_offset_enable $IK_TCP_OFFSET_ENABLE"
+fi
+IK_LEFT_TCP_OFFSET_X_ARG=""
+if [ -n "$IK_LEFT_TCP_OFFSET_X" ]; then
+  IK_LEFT_TCP_OFFSET_X_ARG="--ik_left_tcp_offset_x $IK_LEFT_TCP_OFFSET_X"
+fi
+IK_LEFT_TCP_OFFSET_Y_ARG=""
+if [ -n "$IK_LEFT_TCP_OFFSET_Y" ]; then
+  IK_LEFT_TCP_OFFSET_Y_ARG="--ik_left_tcp_offset_y $IK_LEFT_TCP_OFFSET_Y"
+fi
+IK_LEFT_TCP_OFFSET_Z_ARG=""
+if [ -n "$IK_LEFT_TCP_OFFSET_Z" ]; then
+  IK_LEFT_TCP_OFFSET_Z_ARG="--ik_left_tcp_offset_z $IK_LEFT_TCP_OFFSET_Z"
+fi
+IK_RIGHT_TCP_OFFSET_X_ARG=""
+if [ -n "$IK_RIGHT_TCP_OFFSET_X" ]; then
+  IK_RIGHT_TCP_OFFSET_X_ARG="--ik_right_tcp_offset_x $IK_RIGHT_TCP_OFFSET_X"
+fi
+IK_RIGHT_TCP_OFFSET_Y_ARG=""
+if [ -n "$IK_RIGHT_TCP_OFFSET_Y" ]; then
+  IK_RIGHT_TCP_OFFSET_Y_ARG="--ik_right_tcp_offset_y $IK_RIGHT_TCP_OFFSET_Y"
+fi
+IK_RIGHT_TCP_OFFSET_Z_ARG=""
+if [ -n "$IK_RIGHT_TCP_OFFSET_Z" ]; then
+  IK_RIGHT_TCP_OFFSET_Z_ARG="--ik_right_tcp_offset_z $IK_RIGHT_TCP_OFFSET_Z"
 fi
 
 #source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
@@ -220,4 +256,11 @@ echo $checkpoint_xxx
     $BOX_INIT_Z_ARG \
     $GOAL_X_ARG \
     $GOAL_Y_ARG \
-    $GOAL_Z_ARG
+    $GOAL_Z_ARG \
+    $IK_TCP_OFFSET_ENABLE_ARG \
+    $IK_LEFT_TCP_OFFSET_X_ARG \
+    $IK_LEFT_TCP_OFFSET_Y_ARG \
+    $IK_LEFT_TCP_OFFSET_Z_ARG \
+    $IK_RIGHT_TCP_OFFSET_X_ARG \
+    $IK_RIGHT_TCP_OFFSET_Y_ARG \
+    $IK_RIGHT_TCP_OFFSET_Z_ARG
