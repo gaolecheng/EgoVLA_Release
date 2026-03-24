@@ -221,6 +221,14 @@ def main():
       f"[IK] tcp_offset_enable={bool(task_args.ik_tcp_offset_enable)} "
       f"left_offset={left_tcp_offset} right_offset={right_tcp_offset}"
     )
+    ee_body_names = []
+    if hasattr(env.cfg.left_arm_cfg, "body_names"):
+      ee_body_names.extend([str(x).lower() for x in env.cfg.left_arm_cfg.body_names])
+    if hasattr(env.cfg.right_arm_cfg, "body_names"):
+      ee_body_names.extend([str(x).lower() for x in env.cfg.right_arm_cfg.body_names])
+    if any("finger" in n for n in ee_body_names) and bool(task_args.ik_tcp_offset_enable):
+      print("[IK] finger EE detected; disable tcp offset compensation to avoid double-shift.")
+      task_args.ik_tcp_offset_enable = 0
 
     # IK controllers
     command_type = "pose"
