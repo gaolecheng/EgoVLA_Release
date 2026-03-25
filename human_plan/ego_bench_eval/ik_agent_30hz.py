@@ -80,6 +80,9 @@ parser.add_argument("--ik_right_tcp_offset_y", type=float, default=0.0, help="ri
 parser.add_argument("--ik_right_tcp_offset_z", type=float, default=0.2104, help="right TCP offset z in link7 local frame")
 parser.add_argument("--left_ee_body_name", type=str, default=None, help="optional override for left EE body name (must be a rigid body in robot articulation)")
 parser.add_argument("--right_ee_body_name", type=str, default=None, help="optional override for right EE body name (must be a rigid body in robot articulation)")
+parser.add_argument("--pushbox_guidance_enable", type=int, default=1, help="enable push-box centerline guidance for right-arm EE target")
+parser.add_argument("--pushbox_stuck_window", type=int, default=20, help="window length for box-motion stuck detection")
+parser.add_argument("--pushbox_stuck_box_move_thresh", type=float, default=0.01, help="box xy movement threshold (m) under stuck window")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -341,6 +344,96 @@ def main():
       dot = np.clip(np.abs(np.dot(q_curr, q_goal)), -1.0, 1.0)
       return 2.0 * np.arccos(dot)
 
+    def apply_pushbox_centerline_guidance(
+      action_right_ee,
+      env_results,
+      env,
+      box_xy_hist,
+      stuck_window=20,
+      stuck_box_move_thresh=0.01,
+    ):
+      """
+      Lightly reshape right-arm EE target so contact tends to stay on the box centerline toward goal.
+      Under stuck condition, add a stronger but still bounded correction to escape corner jamming.
+      """
+      if env_results is None or "object_pose" not in env_results[0]:
+        return action_right_ee, {
+          "enabled": 0,
+          "stuck": 0,
+          "box_goal_dist_xy": float("nan"),
+          "box_move_xy_window": float("nan"),
+          "guidance_xy_norm": 0.0,
+        }
+
+      box_pose = env_results[0]["object_pose"][0].detach().cpu().numpy()
+      right_ee_curr = env_results[0]["right_ee_pose"][0].detach().cpu().numpy()
+      box_xy = box_pose[:2].astype(np.float64)
+      right_ee_xy = right_ee_curr[:2].astype(np.float64)
+
+      goal_pos_w = env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()
+      goal_xy = goal_pos_w.numpy()[:2].astype(np.float64)
+
+      vec_goal = goal_xy - box_xy
+      box_goal_dist = float(np.linalg.norm(vec_goal))
+      if box_goal_dist < 1e-6:
+        return action_right_ee, {
+          "enabled": 1,
+          "stuck": 0,
+          "box_goal_dist_xy": box_goal_dist,
+          "box_move_xy_window": 0.0,
+          "guidance_xy_norm": 0.0,
+        }
+      dir_goal = vec_goal / (box_goal_dist + 1e-12)
+      tangent = np.array([-dir_goal[1], dir_goal[0]], dtype=np.float64)
+
+      # Keep a short history to detect geometric jamming (box barely moves while EE keeps contact).
+      box_xy_hist.append(box_xy.copy())
+      box_move_xy_window = 0.0
+      if len(box_xy_hist) >= max(2, stuck_window):
+        box_move_xy_window = float(np.linalg.norm(box_xy_hist[-1] - box_xy_hist[0]))
+
+      ee_box_dist = float(np.linalg.norm(right_ee_xy - box_xy))
+      stuck = (
+        len(box_xy_hist) >= max(2, stuck_window)
+        and box_move_xy_window < float(stuck_box_move_thresh)
+        and ee_box_dist < 0.16
+        and box_goal_dist > 0.09
+      )
+
+      target = np.asarray(action_right_ee, dtype=np.float64).copy()
+      target_xy = target[:2]
+      target_z = float(target[2])
+
+      # Always-on mild centerline guidance:
+      # aim contact around "behind box center" wrt goal direction to encourage clean forward pushes.
+      desired_contact_xy = box_xy - dir_goal * 0.055
+      bias_xy = desired_contact_xy - target_xy
+      bias_xy_norm = float(np.linalg.norm(bias_xy))
+      if bias_xy_norm > 1e-9:
+        target_xy = target_xy + bias_xy / bias_xy_norm * min(0.012, bias_xy_norm)
+
+      desired_z = float(box_pose[2] + 0.015)
+      target_z = float(target_z + np.clip(desired_z - target_z, -0.008, 0.008))
+
+      # If stuck near a corner, add a bounded corrective sweep:
+      # 1) move toward centerline (reduce lateral offset),
+      # 2) keep a small forward push component toward goal.
+      if stuck:
+        lateral = float(np.dot(target_xy - box_xy, tangent))
+        target_xy = target_xy - tangent * np.clip(lateral, -0.010, 0.010)
+        target_xy = target_xy + dir_goal * 0.006
+        target_z = target_z - 0.004
+
+      target[0:2] = target_xy
+      target[2] = target_z
+      return target, {
+        "enabled": 1,
+        "stuck": int(stuck),
+        "box_goal_dist_xy": box_goal_dist,
+        "box_move_xy_window": float(box_move_xy_window),
+        "guidance_xy_norm": float(np.linalg.norm(target[:2] - np.asarray(action_right_ee, dtype=np.float64)[:2])),
+      }
+
     cam_intrinsics = np.array([
       [488.6662,   0.0000, 640.0000],
       [  0.0000, 488.6662, 360.0000],
@@ -456,6 +549,17 @@ def main():
 
         result = False
         ik_debug_rows = []
+        pushbox_guidance_active = (
+          bool(task_args.pushbox_guidance_enable)
+          and task_args.task == "Humanoid-Push-Box-v0"
+          and ik_active_arm in ("right", "both")
+        )
+        box_xy_hist = deque(maxlen=max(2, int(task_args.pushbox_stuck_window)))
+        if pushbox_guidance_active:
+          print(
+            f"[PushBox] centerline guidance enabled: window={int(task_args.pushbox_stuck_window)} "
+            f"move_thresh={float(task_args.pushbox_stuck_box_move_thresh):.4f}m"
+          )
         from human_plan.ego_bench_eval.utils import TASK_MAX_HORIZON
         max_horizon = TASK_MAX_HORIZON[task_args.task]
 
@@ -546,6 +650,23 @@ def main():
             hist_len, task_args.hand_smooth_weight, action_hist_right_hand
           )
 
+          pushbox_debug_info = {
+            "enabled": 0,
+            "stuck": 0,
+            "box_goal_dist_xy": float("nan"),
+            "box_move_xy_window": float("nan"),
+            "guidance_xy_norm": 0.0,
+          }
+          if pushbox_guidance_active:
+            action_right_ee, pushbox_debug_info = apply_pushbox_centerline_guidance(
+              action_right_ee,
+              env_results,
+              env,
+              box_xy_hist,
+              stuck_window=int(task_args.pushbox_stuck_window),
+              stuck_box_move_thresh=float(task_args.pushbox_stuck_box_move_thresh),
+            )
+
           ik_step(
               env,
               left_ik_controller,
@@ -627,7 +748,8 @@ def main():
                 f"L_lim={left_near_limit_ratio:.2f}({left_near_limit_count}) "
                 f"R_lim={right_near_limit_ratio:.2f}({right_near_limit_count}) "
                 f"L_worst={left_worst_joint}@{left_worst_side}:{left_min_margin:.4f} "
-                f"R_worst={right_worst_joint}@{right_worst_side}:{right_min_margin:.4f}"
+                f"R_worst={right_worst_joint}@{right_worst_side}:{right_min_margin:.4f} "
+                f"PB_stuck={pushbox_debug_info['stuck']} PB_bias={pushbox_debug_info['guidance_xy_norm']:.4f}m"
               )
 
             if task_args.debug_ik_csv is not None:
@@ -653,6 +775,11 @@ def main():
                 "right_joint_margin_rad_list": right_margin_values,
                 "ik_ignore_orientation": int(task_args.ik_ignore_orientation),
                 "ik_active_arm": ik_active_arm,
+                "pushbox_guidance_enabled": int(pushbox_debug_info["enabled"]),
+                "pushbox_stuck": int(pushbox_debug_info["stuck"]),
+                "pushbox_box_goal_dist_xy": pushbox_debug_info["box_goal_dist_xy"],
+                "pushbox_box_move_xy_window": pushbox_debug_info["box_move_xy_window"],
+                "pushbox_guidance_xy_norm": pushbox_debug_info["guidance_xy_norm"],
               })
 
           # Success 
