@@ -74,10 +74,12 @@ parser.add_argument("--goal_z", type=float, default=None, help="optional push-bo
 parser.add_argument("--ik_tcp_offset_enable", type=int, default=1, help="enable TCP->link7 translational offset compensation")
 parser.add_argument("--ik_left_tcp_offset_x", type=float, default=0.0, help="left TCP offset x in link7 local frame")
 parser.add_argument("--ik_left_tcp_offset_y", type=float, default=0.0, help="left TCP offset y in link7 local frame")
-parser.add_argument("--ik_left_tcp_offset_z", type=float, default=0.1654, help="left TCP offset z in link7 local frame")
+parser.add_argument("--ik_left_tcp_offset_z", type=float, default=0.2104, help="left TCP offset z in link7 local frame")
 parser.add_argument("--ik_right_tcp_offset_x", type=float, default=0.0, help="right TCP offset x in link7 local frame")
 parser.add_argument("--ik_right_tcp_offset_y", type=float, default=0.0, help="right TCP offset y in link7 local frame")
-parser.add_argument("--ik_right_tcp_offset_z", type=float, default=0.1654, help="right TCP offset z in link7 local frame")
+parser.add_argument("--ik_right_tcp_offset_z", type=float, default=0.2104, help="right TCP offset z in link7 local frame")
+parser.add_argument("--left_ee_body_name", type=str, default=None, help="optional override for left EE body name (must be a rigid body in robot articulation)")
+parser.add_argument("--right_ee_body_name", type=str, default=None, help="optional override for right EE body name (must be a rigid body in robot articulation)")
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -144,6 +146,31 @@ def main():
         num_envs=1,
     )
 
+    left_ee_override = task_args.left_ee_body_name is not None and str(task_args.left_ee_body_name).strip() != ""
+    right_ee_override = task_args.right_ee_body_name is not None and str(task_args.right_ee_body_name).strip() != ""
+    if task_args.task == "Humanoid-Push-Box-v0":
+      # Push-box is easier to stabilize when IK body is link7 and target is compensated to TCP.
+      if not left_ee_override:
+        env_cfg.left_arm_cfg.body_names = ["left_arm_link7"]
+      if not right_ee_override:
+        env_cfg.right_arm_cfg.body_names = ["right_arm_link7"]
+      print(
+        f"[IK] Push-Box default EE bodies: left={env_cfg.left_arm_cfg.body_names[0]} "
+        f"right={env_cfg.right_arm_cfg.body_names[0]}"
+      )
+    if left_ee_override:
+      env_cfg.left_arm_cfg.body_names = [str(task_args.left_ee_body_name).strip()]
+      print(f"[IK] left EE override body={env_cfg.left_arm_cfg.body_names[0]}")
+    if right_ee_override:
+      env_cfg.right_arm_cfg.body_names = [str(task_args.right_ee_body_name).strip()]
+      print(f"[IK] right EE override body={env_cfg.right_arm_cfg.body_names[0]}")
+    if any("hand_tcp" in str(n).lower() for n in env_cfg.left_arm_cfg.body_names):
+      print("[IK] left *_hand_tcp is an Xform (non-rigid). Fallback to left_arm_link7 + TCP offset compensation.")
+      env_cfg.left_arm_cfg.body_names = ["left_arm_link7"]
+    if any("hand_tcp" in str(n).lower() for n in env_cfg.right_arm_cfg.body_names):
+      print("[IK] right *_hand_tcp is an Xform (non-rigid). Fallback to right_arm_link7 + TCP offset compensation.")
+      env_cfg.right_arm_cfg.body_names = ["right_arm_link7"]
+
     # Optional workspace overrides for fast calibration without editing task files.
     if any(v is not None for v in (task_args.robot_base_x, task_args.robot_base_y, task_args.robot_base_z)):
       default_robot_pos = list(env_cfg.robot.init_state.pos)
@@ -195,6 +222,9 @@ def main():
     if ik_active_arm not in ("both", "left", "right"):
       print(f"[IK] invalid --ik_active_arm={task_args.ik_active_arm}, fallback to 'both'")
       ik_active_arm = "both"
+    if task_args.task == "Humanoid-Push-Box-v0" and ik_active_arm == "both":
+      ik_active_arm = "right"
+      print("[IK] Push-Box default: active_arm=right (override with --ik_active_arm if needed).")
     print(
       f"[IK] config: ignore_orientation={bool(task_args.ik_ignore_orientation)} "
       f"active_arm={ik_active_arm}"
@@ -229,6 +259,41 @@ def main():
     if any("finger" in n for n in ee_body_names) and bool(task_args.ik_tcp_offset_enable):
       print("[IK] finger EE detected; disable tcp offset compensation to avoid double-shift.")
       task_args.ik_tcp_offset_enable = 0
+    left_ee_body_id = -1
+    right_ee_body_id = -1
+    left_ee_body_name = str(env.cfg.left_arm_cfg.body_names[0]) if hasattr(env.cfg.left_arm_cfg, "body_names") else "unknown"
+    right_ee_body_name = str(env.cfg.right_arm_cfg.body_names[0]) if hasattr(env.cfg.right_arm_cfg, "body_names") else "unknown"
+    try:
+      left_ee_body_id = int(env.cfg.left_arm_cfg.body_ids[0])
+      right_ee_body_id = int(env.cfg.right_arm_cfg.body_ids[0])
+      if hasattr(env.robot, "body_names"):
+        all_body_names = list(getattr(env.robot, "body_names"))
+        if left_ee_body_id < len(all_body_names):
+          left_ee_body_name = str(all_body_names[left_ee_body_id])
+        if right_ee_body_id < len(all_body_names):
+          right_ee_body_name = str(all_body_names[right_ee_body_id])
+      print(
+        f"[IK] resolved EE: left(id={left_ee_body_id}, name={left_ee_body_name}) "
+        f"right(id={right_ee_body_id}, name={right_ee_body_name})"
+      )
+    except Exception as e:
+      print(f"[IK] failed to print resolved EE body info: {e}")
+    # Startup self-check so deployment logs can confirm config is active.
+    try:
+      startup_checks = []
+      startup_checks.append(("left_ee_resolved", left_ee_body_id >= 0 and left_ee_body_name != "unknown"))
+      startup_checks.append(("right_ee_resolved", right_ee_body_id >= 0 and right_ee_body_name != "unknown"))
+      if task_args.task == "Humanoid-Push-Box-v0":
+        startup_checks.append(("pushbox_right_arm_active", ik_active_arm == "right"))
+        startup_checks.append(("pushbox_ee_link7", "right_arm_link7" in right_ee_body_name.lower()))
+        if bool(task_args.ik_tcp_offset_enable):
+          startup_checks.append(("pushbox_tcp_offset_z", abs(float(task_args.ik_right_tcp_offset_z) - 0.2104) < 1e-6))
+      check_ok = all(flag for _, flag in startup_checks)
+      print(f"[IK][CHECK] {'PASS' if check_ok else 'WARN'}")
+      for name, flag in startup_checks:
+        print(f"[IK][CHECK] {name}={'OK' if flag else 'BAD'}")
+    except Exception as e:
+      print(f"[IK][CHECK] failed to run startup checks: {e}")
 
     # IK controllers
     command_type = "pose"

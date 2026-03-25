@@ -38,6 +38,8 @@ IK_LEFT_TCP_OFFSET_Z=${35}
 IK_RIGHT_TCP_OFFSET_X=${36}
 IK_RIGHT_TCP_OFFSET_Y=${37}
 IK_RIGHT_TCP_OFFSET_Z=${38}
+LEFT_EE_BODY_NAME=${39}
+RIGHT_EE_BODY_NAME=${40}
 
 DEBUG_IK_ARG=""
 if [ -n "$DEBUG_IK" ]; then
@@ -128,6 +130,14 @@ fi
 IK_RIGHT_TCP_OFFSET_Z_ARG=""
 if [ -n "$IK_RIGHT_TCP_OFFSET_Z" ]; then
   IK_RIGHT_TCP_OFFSET_Z_ARG="--ik_right_tcp_offset_z $IK_RIGHT_TCP_OFFSET_Z"
+fi
+LEFT_EE_BODY_NAME_ARG=""
+if [ -n "$LEFT_EE_BODY_NAME" ]; then
+  LEFT_EE_BODY_NAME_ARG="--left_ee_body_name $LEFT_EE_BODY_NAME"
+fi
+RIGHT_EE_BODY_NAME_ARG=""
+if [ -n "$RIGHT_EE_BODY_NAME" ]; then
+  RIGHT_EE_BODY_NAME_ARG="--right_ee_body_name $RIGHT_EE_BODY_NAME"
 fi
 
 #source /home/rchal97/code/clean_egovla/isaacsim/setup_conda_env.sh
@@ -263,4 +273,6 @@ echo $checkpoint_xxx
     $IK_LEFT_TCP_OFFSET_Z_ARG \
     $IK_RIGHT_TCP_OFFSET_X_ARG \
     $IK_RIGHT_TCP_OFFSET_Y_ARG \
-    $IK_RIGHT_TCP_OFFSET_Z_ARG
+    $IK_RIGHT_TCP_OFFSET_Z_ARG \
+    $LEFT_EE_BODY_NAME_ARG \
+    $RIGHT_EE_BODY_NAME_ARG
