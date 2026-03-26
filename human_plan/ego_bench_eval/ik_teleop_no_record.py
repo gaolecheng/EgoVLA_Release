@@ -82,9 +82,10 @@ def overlay_info(frame_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
     vis = frame_rgb.copy()
     y = 24
     for line in lines:
-        color = (40, 255, 40)
+        # Draw default overlay text in red for better readability.
+        color = (255, 64, 64)
         if line.startswith("[WARN]"):
-            color = (255, 80, 80)
+            color = (255, 0, 0)
         cv2.putText(
             vis,
             line,
@@ -109,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--ik_active_arm", type=str, default="right", choices=["left", "right", "both"])
     parser.add_argument("--right_only_mode", type=int, default=1, help="1=lock to right arm teleop, ignore 1/3 arm-switch keys")
+    parser.add_argument("--ik_ignore_orientation", type=int, default=1, help="1=position-only IK, 0=track full pose")
     parser.add_argument("--ik_tcp_offset_enable", type=int, default=1)
     parser.add_argument("--ik_left_tcp_offset_x", type=float, default=0.0)
     parser.add_argument("--ik_left_tcp_offset_y", type=float, default=0.0)
@@ -222,12 +224,14 @@ def main():
     left_tcp_offset = (args.ik_left_tcp_offset_x, args.ik_left_tcp_offset_y, args.ik_left_tcp_offset_z)
     right_tcp_offset = (args.ik_right_tcp_offset_x, args.ik_right_tcp_offset_y, args.ik_right_tcp_offset_z)
     tcp_offset_enable = bool(args.ik_tcp_offset_enable)
+    ignore_orientation = bool(args.ik_ignore_orientation)
     if tcp_offset_enable:
         print(
             f"[Teleop] target frame=TCP, IK body=link7, offsets L={left_tcp_offset} R={right_tcp_offset}"
         )
     else:
         print("[Teleop] target frame=link7 (tcp offset compensation disabled)")
+    print(f"[Teleop] IK mode={'position-only' if ignore_orientation else 'full-pose'}")
 
     bench_seq_name = None
     bench_randomize_idx = None
@@ -303,7 +307,7 @@ def main():
                         left_dof,
                         right_dof,
                         action,
-                        ignore_orientation=False,
+                        ignore_orientation=ignore_orientation,
                         active_arm="both",
                         tcp_offset_enable=False,
                         left_tcp_offset=(0.0, 0.0, 0.0),
@@ -360,7 +364,10 @@ def main():
 
     print("[Teleop] Ready. Focus the OpenCV window and use keys.")
     print("[Teleop] Move: W/S(+/-X), A/D(+/-Y), R/F(+/-Z)")
-    print("[Teleop] Rotate: U/O(+/-Roll), I/K(+/-Pitch), J/L(+/-Yaw)")
+    if ignore_orientation:
+        print("[Teleop] Rotate keys disabled in position-only mode.")
+    else:
+        print("[Teleop] Rotate: U/O(+/-Roll), I/K(+/-Pitch), J/L(+/-Yaw)")
     if bool(args.right_only_mode):
         print("[Teleop] Right-only mode ON: only right arm moves. P=sync, N=reset, Q=quit")
     else:
@@ -403,9 +410,12 @@ def main():
         if bool(args.workspace_warn_enable):
             ws_warnings, ws_rot_delta_deg = check_right_workspace(right_target)
 
-        controls_line = "Move: W/S A/D R/F | Rot: U/O I/K J/L | P sync | N reset | Q quit"
+        controls_line = "Move: W/S A/D R/F"
+        if not ignore_orientation:
+            controls_line += " | Rot: U/O I/K J/L"
+        controls_line += " | P sync | N reset | Q quit"
         if not bool(args.right_only_mode):
-            controls_line = "Move: W/S A/D R/F | Rot: U/O I/K J/L | 1/2/3 arm | P sync | N reset | Q quit"
+            controls_line = controls_line.replace(" | P sync", " | 1/2/3 arm | P sync")
 
         lines = [
             f"step={step_idx} active_arm={active_arm_runtime}",
@@ -487,17 +497,17 @@ def main():
             dp[2] += args.pos_step
         elif key == ord("f"):
             dp[2] -= args.pos_step
-        elif key == ord("u"):
+        elif (not ignore_orientation) and key == ord("u"):
             drpy[0] += rot_step_rad
-        elif key == ord("o"):
+        elif (not ignore_orientation) and key == ord("o"):
             drpy[0] -= rot_step_rad
-        elif key == ord("i"):
+        elif (not ignore_orientation) and key == ord("i"):
             drpy[1] += rot_step_rad
-        elif key == ord("k"):
+        elif (not ignore_orientation) and key == ord("k"):
             drpy[1] -= rot_step_rad
-        elif key == ord("j"):
+        elif (not ignore_orientation) and key == ord("j"):
             drpy[2] += rot_step_rad
-        elif key == ord("l"):
+        elif (not ignore_orientation) and key == ord("l"):
             drpy[2] -= rot_step_rad
 
         def apply_delta(target_pose: np.ndarray):
@@ -526,7 +536,7 @@ def main():
             left_hand_dof,
             right_hand_dof,
             action,
-            ignore_orientation=False,
+            ignore_orientation=ignore_orientation,
             active_arm=active_arm_runtime,
             tcp_offset_enable=tcp_offset_enable,
             left_tcp_offset=left_tcp_offset,
