@@ -135,6 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init_pose_pkl", type=str, default="init_poses_fixed_set_100traj.pkl")
     parser.add_argument("--init_episode_rank", type=int, default=0, help="index in TASK_INIT_EPISODE list")
     parser.add_argument("--init_warmup_steps", type=int, default=100)
+    parser.add_argument("--lock_box_after_init", type=int, default=1, help="restore box pose after init warmup to prevent accidental pre-contact")
     parser.add_argument("--bench_num_episodes", type=int, default=3, help="same meaning as benchmark arg --num_episodes")
     parser.add_argument("--bench_num_trials", type=int, default=1, help="same meaning as benchmark arg --num_trials")
     parser.add_argument("--bench_trial_idx", type=int, default=0, help="which trial index to mimic in benchmark flow")
@@ -280,6 +281,9 @@ def main():
         if args.start_mode == "benchmark" and env_cfg.randomize and bench_randomize_idx is not None:
             env.cfg.randomize_idx = bench_randomize_idx
         env_results_local = env.reset()
+        box_pose_before_warmup = None
+        if "object_pose" in env_results_local[0]:
+            box_pose_before_warmup = env_results_local[0]["object_pose"][0].detach().cpu().numpy().copy()
         left_ik_controller.reset()
         right_ik_controller.reset()
 
@@ -317,6 +321,30 @@ def main():
                 print(f"[Teleop] start_mode={args.start_mode} loaded: task={task_name}, seq={seq_name}")
             except Exception as e:
                 print(f"[Teleop] {args.start_mode} init failed, fallback to reset pose. reason={e}")
+
+        box_pose_after_warmup = None
+        if "object_pose" in env_results_local[0]:
+            box_pose_after_warmup = env_results_local[0]["object_pose"][0].detach().cpu().numpy().copy()
+        if box_pose_before_warmup is not None and box_pose_after_warmup is not None:
+            warmup_box_shift = float(np.linalg.norm(box_pose_after_warmup[:3] - box_pose_before_warmup[:3]))
+            print(f"[Teleop] init warmup box shift={warmup_box_shift:.4f} m")
+
+        # Teleop-friendly protection: keep box at reset pose so user starts from a clean state.
+        if (
+            bool(args.lock_box_after_init)
+            and box_pose_before_warmup is not None
+            and hasattr(env, "box")
+        ):
+            env_ids = torch.tensor([0], device=env.device, dtype=torch.long)
+            box_root_state = env.box.data.default_root_state[env_ids, :].clone()
+            box_pose_before_t = torch.as_tensor(
+                box_pose_before_warmup, dtype=box_root_state.dtype, device=env.device
+            ).unsqueeze(0)
+            box_root_state[:, 0:3] = box_pose_before_t[:, 0:3] + env.scene.env_origins[env_ids, 0:3]
+            box_root_state[:, 3:7] = box_pose_before_t[:, 3:7]
+            box_root_state[:, 7:13] = 0.0
+            env.box.write_root_state_to_sim(box_root_state, env_ids=env_ids)
+            print("[Teleop] restored box pose after init warmup.")
 
         left_curr_pose = env_results_local[0]["left_ee_pose"][0].detach().cpu().numpy().copy()
         right_curr_pose = env_results_local[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
