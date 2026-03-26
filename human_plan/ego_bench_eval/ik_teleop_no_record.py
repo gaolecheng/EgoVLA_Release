@@ -135,7 +135,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init_pose_pkl", type=str, default="init_poses_fixed_set_100traj.pkl")
     parser.add_argument("--init_episode_rank", type=int, default=0, help="index in TASK_INIT_EPISODE list")
     parser.add_argument("--init_warmup_steps", type=int, default=100)
+    parser.add_argument(
+        "--preserve_usd_initial_ee",
+        type=int,
+        default=1,
+        help="1=keep USD-loaded EE pose exactly at reset (skip eval-init warmup and post-init retreat)",
+    )
     parser.add_argument("--lock_box_after_init", type=int, default=1, help="restore box pose after init warmup to prevent accidental pre-contact")
+    parser.add_argument("--post_init_retreat_steps", type=int, default=24, help="interpolation steps for post-init retreat")
+    parser.add_argument("--post_init_left_retreat_x", type=float, default=-0.12, help="left TCP retreat along world X after init")
+    parser.add_argument("--post_init_right_retreat_x", type=float, default=-0.06, help="right TCP retreat along world X after init")
+    parser.add_argument("--post_init_left_retreat_y", type=float, default=0.0, help="left TCP retreat along world Y after init")
+    parser.add_argument("--post_init_right_retreat_y", type=float, default=0.0, help="right TCP retreat along world Y after init")
     parser.add_argument("--bench_num_episodes", type=int, default=3, help="same meaning as benchmark arg --num_episodes")
     parser.add_argument("--bench_num_trials", type=int, default=1, help="same meaning as benchmark arg --num_trials")
     parser.add_argument("--bench_trial_idx", type=int, default=0, help="which trial index to mimic in benchmark flow")
@@ -287,7 +298,9 @@ def main():
         left_ik_controller.reset()
         right_ik_controller.reset()
 
-        if args.start_mode in ("eval_init", "benchmark"):
+        if bool(args.preserve_usd_initial_ee):
+            print("[Teleop] preserve_usd_initial_ee=1: skip eval-init warmup; keep USD reset EE pose.")
+        elif args.start_mode in ("eval_init", "benchmark"):
             try:
                 if args.start_mode == "benchmark" and bench_seq_name is not None:
                     seq_name = bench_seq_name
@@ -331,6 +344,8 @@ def main():
 
         # Teleop-friendly protection: keep box at reset pose so user starts from a clean state.
         if (
+            (not bool(args.preserve_usd_initial_ee))
+            and
             bool(args.lock_box_after_init)
             and box_pose_before_warmup is not None
             and hasattr(env, "box")
@@ -356,6 +371,56 @@ def main():
         else:
             left_target_pose = left_curr_pose
             right_target_pose = right_curr_pose
+
+        # Optional retreat mode (disabled when preserving USD reset EE pose).
+        if not bool(args.preserve_usd_initial_ee):
+            left_retreat = np.array([float(args.post_init_left_retreat_x), float(args.post_init_left_retreat_y), 0.0], dtype=np.float64)
+            right_retreat = np.array([float(args.post_init_right_retreat_x), float(args.post_init_right_retreat_y), 0.0], dtype=np.float64)
+            retreat_steps = max(0, int(args.post_init_retreat_steps))
+            if retreat_steps > 0 and (np.linalg.norm(left_retreat) > 1e-9 or np.linalg.norm(right_retreat) > 1e-9):
+                left_start = left_target_pose.copy()
+                right_start = right_target_pose.copy()
+                left_goal = left_start.copy()
+                right_goal = right_start.copy()
+                left_goal[:3] = left_goal[:3] + left_retreat
+                right_goal[:3] = right_goal[:3] + right_retreat
+
+                for s in range(retreat_steps):
+                    alpha = float(s + 1) / float(retreat_steps)
+                    left_cmd = left_start.copy()
+                    right_cmd = right_start.copy()
+                    left_cmd[:3] = left_start[:3] + alpha * (left_goal[:3] - left_start[:3])
+                    right_cmd[:3] = right_start[:3] + alpha * (right_goal[:3] - right_start[:3])
+                    ik_step(
+                        env,
+                        left_ik_controller,
+                        right_ik_controller,
+                        left_ik_commands_world,
+                        right_ik_commands_world,
+                        left_ik_commands_robot,
+                        right_ik_commands_robot,
+                        left_cmd,
+                        right_cmd,
+                        left_hand_dof,
+                        right_hand_dof,
+                        action,
+                        ignore_orientation=ignore_orientation,
+                        active_arm="both",
+                        tcp_offset_enable=tcp_offset_enable,
+                        left_tcp_offset=left_tcp_offset,
+                        right_tcp_offset=right_tcp_offset,
+                    )
+                    env_results_local = env.step(action)
+
+                left_target_pose = left_goal
+                right_target_pose = right_goal
+                print(
+                    "[Teleop] post-init retreat applied: "
+                    f"left(dx={left_retreat[0]:.3f},dy={left_retreat[1]:.3f}) "
+                    f"right(dx={right_retreat[0]:.3f},dy={right_retreat[1]:.3f}), "
+                    f"steps={retreat_steps}"
+                )
+
         if "object_pose" in env_results_local[0]:
             box0 = env_results_local[0]["object_pose"][0].detach().cpu().numpy()[:3]
             if hasattr(env, "goal_pos_w"):
