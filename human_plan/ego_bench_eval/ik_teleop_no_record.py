@@ -79,7 +79,7 @@ def overlay_info(frame_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Init-only scene checker: keep USD reset pose (no warmup, no teleop)."
+        description="No-warmup teleop checker with optional right-arm joint control."
     )
     parser.add_argument("--task", type=str, default="Humanoid-Push-Box-v0")
     parser.add_argument("--room_idx", type=int, default=1)
@@ -90,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", type=int, default=0)
     parser.add_argument("--loop_hz", type=float, default=30.0)
     parser.add_argument("--freeze_after_reset", type=int, default=1, help="1=hold reset frame, 0=step with zero action")
+    parser.add_argument("--enable_right_joint_teleop", type=int, default=1, help="1=enable keyboard teleop for right arm joint targets")
+    parser.add_argument("--right_joint_step", type=float, default=0.02, help="right-arm joint increment in rad")
+    parser.add_argument("--right_joint_clip_to_limits", type=int, default=1, help="clip right joint target to dof limits")
 
     parser.add_argument("--left_ee_body_name", type=str, default="left_arm_link7")
     parser.add_argument("--right_ee_body_name", type=str, default="right_arm_link7")
@@ -105,12 +108,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--robot_base_x", type=float, default=None)
     parser.add_argument("--robot_base_y", type=float, default=None)
     parser.add_argument("--robot_base_z", type=float, default=None)
-    parser.add_argument("--box_init_x", type=float, default=None)
-    parser.add_argument("--box_init_y", type=float, default=None)
-    parser.add_argument("--box_init_z", type=float, default=None)
-    parser.add_argument("--goal_x", type=float, default=None)
-    parser.add_argument("--goal_y", type=float, default=None)
-    parser.add_argument("--goal_z", type=float, default=None)
+    # Align teleop default box pose with current benchmark reset scene.
+    parser.add_argument("--box_init_x", type=float, default=0.4283)
+    parser.add_argument("--box_init_y", type=float, default=-0.3960)
+    parser.add_argument("--box_init_z", type=float, default=1.0400)
+    # Align teleop default goal pose with current benchmark reset scene.
+    parser.add_argument("--goal_x", type=float, default=0.5288)
+    parser.add_argument("--goal_y", type=float, default=0.0717)
+    parser.add_argument("--goal_z", type=float, default=1.0210)
 
     parser.add_argument("--use_benchmark_random_idx", type=int, default=1)
     parser.add_argument("--bench_num_episodes", type=int, default=3)
@@ -265,31 +270,88 @@ def main():
     env: BaseEnv = gym.make(args.task, cfg=env_cfg)
     maybe_apply_benchmark_randomize_idx(env, args)
 
-    print("[InitOnly] preserve_usd_initial_ee=1 behavior is enforced in this script.")
-    print("[InitOnly] NO init_poses warmup, NO IK tracking, NO teleop deltas.")
+    print("[Teleop] preserve_usd_initial_ee=1 behavior is enforced in this script.")
+    print("[Teleop] NO init_poses warmup, NO IK tracking.")
 
     env_results = env.reset()
     print_init_state(env, env_results, args)
 
     dt = 1.0 / max(1e-3, float(args.loop_hz))
     zero_action = torch.zeros((env.scene.num_envs, env.num_actions), device=env.robot.device)
+    action_target = torch.zeros((env.scene.num_envs, env.num_actions), device=env.robot.device)
+    dof_lower = env.robot_dof_lower_limits
+    dof_upper = env.robot_dof_upper_limits
+    left_joint_ids = [int(x) for x in env.cfg.left_arm_cfg.joint_ids]
+    right_joint_ids = [int(x) for x in env.cfg.right_arm_cfg.joint_ids]
+    right_joint_names = list(getattr(env.cfg.right_arm_cfg, "joint_names", []))
+    if len(right_joint_names) != len(right_joint_ids):
+        right_joint_names = [f"right_arm_joint{i + 1}" for i in range(len(right_joint_ids))]
+    selected_right_joint = 0
+    teleop_enabled = bool(args.enable_right_joint_teleop)
+    left_initial_q = None
+    try:
+        left_initial_q = env_results[0]["qpos"][0, left_joint_ids].detach().clone()
+    except Exception:
+        left_initial_q = None
 
-    window_name = "Init-Only Fixed RGB"
+    window_name = "Teleop Fixed RGB (Right Joint Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    print("[InitOnly] Ready. Q/Esc quit, N reset scene.")
+    print("[Teleop] Ready. Q/Esc quit, N reset scene.")
+    if teleop_enabled:
+        print("[Teleop] Right joint control ON: 1-7 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
+        print("[Teleop] Right joint limits (rad, from articulation/USD):")
+        for idx, jid in enumerate(right_joint_ids):
+            lo = float(dof_lower[jid].detach().cpu().item())
+            hi = float(dof_upper[jid].detach().cpu().item())
+            print(f"  - {idx + 1}:{right_joint_names[idx]} (dof_id={jid}) in [{lo:.4f}, {hi:.4f}]")
+        if left_initial_q is not None:
+            print("[Teleop] Left arm is locked to reset initial joint values.")
+    else:
+        print("[Teleop] Right joint control OFF (enable with --enable_right_joint_teleop 1).")
     while simulation_app.is_running():
         tic = time.time()
 
         rgb_obs = env_results[0]["fixed_rgb"][0].detach().cpu().numpy()
         rgb_obs = to_uint8_rgb(rgb_obs)
 
+        # Keep a copy of current qpos as base target each step, then modify selected right joint.
+        try:
+            q_now = env_results[0]["qpos"]
+            action_target[:, :] = q_now[:, : env.num_actions]
+            if left_initial_q is not None and len(left_joint_ids) > 0:
+                action_target[0, left_joint_ids] = left_initial_q.to(action_target.dtype)
+        except Exception:
+            action_target[:, :] = zero_action
+
         lines = [
-            "Init-only mode: USD reset pose kept",
-            "No warmup / no teleop arm control",
-            "Keys: N reset | Q quit",
+            "No-warmup mode: USD reset pose kept",
+            f"right_joint_teleop={int(teleop_enabled)}",
+            "Keys: N reset | Q quit | 1-7 select | J/K dec/inc | U/I prev/next",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
+        if "object_pose" in env_results[0]:
+            box = env_results[0]["object_pose"][0].detach().cpu().numpy()
+            lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
+        if hasattr(env, "goal_pos_w"):
+            goal = (env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()).numpy()
+            lines.append(f"goal_xyz=({goal[0]:.4f},{goal[1]:.4f},{goal[2]:.4f})")
+        if teleop_enabled and len(right_joint_ids) > 0:
+            sel = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
+            jid = right_joint_ids[sel]
+            try:
+                q_now_val = float(env_results[0]["qpos"][0, jid].detach().cpu().item())
+            except Exception:
+                q_now_val = float("nan")
+            q_tgt_val = float(action_target[0, jid].detach().cpu().item())
+            q_lo = float(dof_lower[jid].detach().cpu().item())
+            q_hi = float(dof_upper[jid].detach().cpu().item())
+            jname = right_joint_names[sel]
+            lines.append(
+                f"selected_right={sel+1}:{jname} dof_id={jid} "
+                f"q_now={q_now_val:.4f} q_tgt={q_tgt_val:.4f}"
+            )
+            lines.append(f"selected_range=[{q_lo:.4f}, {q_hi:.4f}] rad")
         vis = overlay_info(rgb_obs, lines)
         cv2.imshow(window_name, vis[:, :, ::-1])
         key = cv2.waitKey(1) & 0xFF
@@ -299,9 +361,65 @@ def main():
         if key == ord("n"):
             env_results = env.reset()
             print_init_state(env, env_results, args)
+            selected_right_joint = 0
+            try:
+                left_initial_q = env_results[0]["qpos"][0, left_joint_ids].detach().clone()
+            except Exception:
+                left_initial_q = None
             continue
 
-        if bool(args.freeze_after_reset):
+        delta = 0.0
+        if teleop_enabled and len(right_joint_ids) > 0:
+            if key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
+                selected_right_joint = int(chr(key)) - 1
+                selected_right_joint = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
+                sel = selected_right_joint
+                jid = right_joint_ids[sel]
+                lo = float(dof_lower[jid].detach().cpu().item())
+                hi = float(dof_upper[jid].detach().cpu().item())
+                print(
+                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
+                )
+            elif key == ord("u"):
+                selected_right_joint = max(0, selected_right_joint - 1)
+                sel = selected_right_joint
+                jid = right_joint_ids[sel]
+                lo = float(dof_lower[jid].detach().cpu().item())
+                hi = float(dof_upper[jid].detach().cpu().item())
+                print(
+                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
+                )
+            elif key == ord("i"):
+                selected_right_joint = min(len(right_joint_ids) - 1, selected_right_joint + 1)
+                sel = selected_right_joint
+                jid = right_joint_ids[sel]
+                lo = float(dof_lower[jid].detach().cpu().item())
+                hi = float(dof_upper[jid].detach().cpu().item())
+                print(
+                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
+                )
+            elif key == ord("j"):
+                delta = -float(args.right_joint_step)
+            elif key == ord("k"):
+                delta = float(args.right_joint_step)
+
+            if abs(delta) > 0.0:
+                sel = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
+                jid = right_joint_ids[sel]
+                action_target[0, jid] = action_target[0, jid] + delta
+                if bool(args.right_joint_clip_to_limits):
+                    action_target[0, jid] = torch.clamp(action_target[0, jid], dof_lower[jid], dof_upper[jid])
+                print(
+                    f"[Teleop] {right_joint_names[sel]} -> "
+                    f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
+                )
+
+        if teleop_enabled:
+            env_results = env.step(action_target)
+        elif bool(args.freeze_after_reset):
             simulation_app.update()
         else:
             env_results = env.step(zero_action)
