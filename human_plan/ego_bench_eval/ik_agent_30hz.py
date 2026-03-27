@@ -50,6 +50,8 @@ parser.add_argument("--input_obs_dir", type=str, default="/home/ubuntu/Desktop/E
 parser.add_argument("--debug_ik", type=int, default=0, help="print IK tracking diagnostics")
 parser.add_argument("--debug_ik_stride", type=int, default=10, help="print diagnostics every N steps")
 parser.add_argument("--debug_ik_csv", type=str, default=None, help="optional directory for saving per-trial IK diagnostics csv")
+parser.add_argument("--debug_scene_pose", type=int, default=1, help="print box/goal xyz diagnostics")
+parser.add_argument("--debug_scene_pose_stride", type=int, default=10, help="print box/goal xyz every N env steps")
 parser.add_argument(
     "--ik_ignore_orientation",
     type=int,
@@ -344,6 +346,46 @@ def main():
       dot = np.clip(np.abs(np.dot(q_curr, q_goal)), -1.0, 1.0)
       return 2.0 * np.arccos(dot)
 
+    def get_box_goal_xyz(env_results):
+      box_xyz = None
+      goal_xyz = None
+      try:
+        if env_results is not None and "object_pose" in env_results[0]:
+          box_xyz = env_results[0]["object_pose"][0].detach().cpu().numpy()[:3].astype(np.float64)
+      except Exception:
+        box_xyz = None
+      try:
+        if hasattr(env, "goal_pos_w"):
+          goal_pos_w = env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()
+          goal_xyz = goal_pos_w.numpy()[:3].astype(np.float64)
+      except Exception:
+        goal_xyz = None
+      return box_xyz, goal_xyz
+
+    def print_box_goal_xyz(tag, env_results, step_idx=None):
+      if not bool(task_args.debug_scene_pose):
+        return
+      box_xyz, goal_xyz = get_box_goal_xyz(env_results)
+      step_text = f" step={step_idx}" if step_idx is not None else ""
+      if box_xyz is None and goal_xyz is None:
+        print(f"[SCENE-POSE]{step_text} {tag}: box_xyz=N/A goal_xyz=N/A")
+      elif box_xyz is None:
+        print(
+          f"[SCENE-POSE]{step_text} {tag}: "
+          f"box_xyz=N/A goal_xyz=({goal_xyz[0]:.4f},{goal_xyz[1]:.4f},{goal_xyz[2]:.4f})"
+        )
+      elif goal_xyz is None:
+        print(
+          f"[SCENE-POSE]{step_text} {tag}: "
+          f"box_xyz=({box_xyz[0]:.4f},{box_xyz[1]:.4f},{box_xyz[2]:.4f}) goal_xyz=N/A"
+        )
+      else:
+        print(
+          f"[SCENE-POSE]{step_text} {tag}: "
+          f"box_xyz=({box_xyz[0]:.4f},{box_xyz[1]:.4f},{box_xyz[2]:.4f}) "
+          f"goal_xyz=({goal_xyz[0]:.4f},{goal_xyz[1]:.4f},{goal_xyz[2]:.4f})"
+        )
+
     def apply_pushbox_centerline_guidance(
       action_right_ee,
       env_results,
@@ -503,15 +545,19 @@ def main():
           curr_random_idx += 1
           env.cfg.randomize_idx = randomize_idxes[curr_random_idx]
           env_results = env.reset()
+          print_box_goal_xyz("after_reset", env_results)
           left_ik_controller.reset()
           right_ik_controller.reset()
           padding_idx = padding
           # for padding_idx in range(padding):
+          rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
+          rgb_obs = cv2.resize(rgb_obs, (384, 384))
 
           left_dof = init_poses[load_name][seq_name][padding]["left_dof"]
           right_dof = init_poses[load_name][seq_name][padding]["right_dof"]
 
-          for idx in range(100):
+          # Temporary minimal change: disable warmup for Franka adaptation.
+          for idx in range(0):
             left_dof = init_poses[load_name][seq_name][padding]["left_dof"]
             right_dof = init_poses[load_name][seq_name][padding]["right_dof"]
             
@@ -544,6 +590,7 @@ def main():
             env_results = env.step(action)
             rgb_obs = env_results[0]["fixed_rgb"][0].cpu().numpy()[:, :, :]
             rgb_obs = cv2.resize(rgb_obs, (384, 384))
+          print_box_goal_xyz("after_warmup", env_results)
         rgb_obs_hist.append(rgb_obs)
         count = padding
 
@@ -692,6 +739,8 @@ def main():
               right_tcp_offset=right_tcp_offset,
           )
           env_results = env.step(action)
+          if bool(task_args.debug_scene_pose) and (i % max(1, int(task_args.debug_scene_pose_stride)) == 0):
+            print_box_goal_xyz("rollout", env_results, step_idx=i)
 
           if task_args.debug_ik:
             left_curr = env_results[0]["left_ee_pose"][0].detach().cpu().numpy()
