@@ -281,32 +281,56 @@ def main():
     action_target = torch.zeros((env.scene.num_envs, env.num_actions), device=env.robot.device)
     dof_lower = env.robot_dof_lower_limits
     dof_upper = env.robot_dof_upper_limits
-    left_joint_ids = [int(x) for x in env.cfg.left_arm_cfg.joint_ids]
-    right_joint_ids = [int(x) for x in env.cfg.right_arm_cfg.joint_ids]
-    right_joint_names = list(getattr(env.cfg.right_arm_cfg, "joint_names", []))
-    if len(right_joint_names) != len(right_joint_ids):
-        right_joint_names = [f"right_arm_joint{i + 1}" for i in range(len(right_joint_ids))]
+    left_arm_joint_ids = [int(x) for x in env.cfg.left_arm_cfg.joint_ids]
+    left_hand_joint_ids = [int(x) for x in getattr(env.cfg.left_hand_cfg, "joint_ids", [])]
+    right_arm_joint_ids = [int(x) for x in env.cfg.right_arm_cfg.joint_ids]
+    right_hand_joint_ids = [int(x) for x in getattr(env.cfg.right_hand_cfg, "joint_ids", [])]
+
+    left_lock_joint_ids = []
+    for jid in left_arm_joint_ids + left_hand_joint_ids:
+        if jid not in left_lock_joint_ids:
+            left_lock_joint_ids.append(jid)
+
+    right_arm_joint_names = list(getattr(env.cfg.right_arm_cfg, "joint_names", []))
+    if len(right_arm_joint_names) != len(right_arm_joint_ids):
+        right_arm_joint_names = [f"right_arm_joint{i + 1}" for i in range(len(right_arm_joint_ids))]
+    right_hand_joint_names = list(getattr(env.cfg.right_hand_cfg, "joint_names", []))
+    if len(right_hand_joint_names) != len(right_hand_joint_ids):
+        right_hand_joint_names = [f"right_hand_joint{i + 1}" for i in range(len(right_hand_joint_ids))]
+
+    right_control_joint_ids = []
+    right_control_joint_names = []
+    for jid, jname in list(zip(right_arm_joint_ids, right_arm_joint_names)) + list(zip(right_hand_joint_ids, right_hand_joint_names)):
+        if jid not in right_control_joint_ids:
+            right_control_joint_ids.append(jid)
+            right_control_joint_names.append(jname)
+
     selected_right_joint = 0
     teleop_enabled = bool(args.enable_right_joint_teleop)
-    left_initial_q = None
+    left_lock_initial_q = None
     try:
-        left_initial_q = env_results[0]["qpos"][0, left_joint_ids].detach().clone()
+        q_now = env_results[0]["qpos"]
+        action_target[:, :] = q_now[:, : env.num_actions].clone()
+        if len(left_lock_joint_ids) > 0:
+            left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
+            action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
     except Exception:
-        left_initial_q = None
+        action_target[:, :] = zero_action
+        left_lock_initial_q = None
 
     window_name = "Teleop Fixed RGB (Right Joint Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     print("[Teleop] Ready. Q/Esc quit, N reset scene.")
     if teleop_enabled:
-        print("[Teleop] Right joint control ON: 1-7 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
-        print("[Teleop] Right joint limits (rad, from articulation/USD):")
-        for idx, jid in enumerate(right_joint_ids):
+        print("[Teleop] Right joint control ON: 1-9 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
+        print("[Teleop] Right control joints (arm + finger), limits in rad from articulation/USD:")
+        for idx, jid in enumerate(right_control_joint_ids):
             lo = float(dof_lower[jid].detach().cpu().item())
             hi = float(dof_upper[jid].detach().cpu().item())
-            print(f"  - {idx + 1}:{right_joint_names[idx]} (dof_id={jid}) in [{lo:.4f}, {hi:.4f}]")
-        if left_initial_q is not None:
-            print("[Teleop] Left arm is locked to reset initial joint values.")
+            print(f"  - {idx + 1}:{right_control_joint_names[idx]} (dof_id={jid}) in [{lo:.4f}, {hi:.4f}]")
+        if left_lock_initial_q is not None:
+            print("[Teleop] Left arm+hand are locked to reset initial joint values.")
     else:
         print("[Teleop] Right joint control OFF (enable with --enable_right_joint_teleop 1).")
     while simulation_app.is_running():
@@ -315,19 +339,15 @@ def main():
         rgb_obs = env_results[0]["fixed_rgb"][0].detach().cpu().numpy()
         rgb_obs = to_uint8_rgb(rgb_obs)
 
-        # Keep a copy of current qpos as base target each step, then modify selected right joint.
-        try:
-            q_now = env_results[0]["qpos"]
-            action_target[:, :] = q_now[:, : env.num_actions]
-            if left_initial_q is not None and len(left_joint_ids) > 0:
-                action_target[0, left_joint_ids] = left_initial_q.to(action_target.dtype)
-        except Exception:
-            action_target[:, :] = zero_action
+        # Keep q_tgt persistent across steps; only keyboard edits should change it.
+        # Left arm is forced to reset values so it stays in initial pose.
+        if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+            action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
 
         lines = [
             "No-warmup mode: USD reset pose kept",
             f"right_joint_teleop={int(teleop_enabled)}",
-            "Keys: N reset | Q quit | 1-7 select | J/K dec/inc | U/I prev/next",
+            "Keys: N reset | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
         if "object_pose" in env_results[0]:
@@ -336,9 +356,9 @@ def main():
         if hasattr(env, "goal_pos_w"):
             goal = (env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()).numpy()
             lines.append(f"goal_xyz=({goal[0]:.4f},{goal[1]:.4f},{goal[2]:.4f})")
-        if teleop_enabled and len(right_joint_ids) > 0:
-            sel = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
-            jid = right_joint_ids[sel]
+        if teleop_enabled and len(right_control_joint_ids) > 0:
+            sel = int(np.clip(selected_right_joint, 0, len(right_control_joint_ids) - 1))
+            jid = right_control_joint_ids[sel]
             try:
                 q_now_val = float(env_results[0]["qpos"][0, jid].detach().cpu().item())
             except Exception:
@@ -346,7 +366,7 @@ def main():
             q_tgt_val = float(action_target[0, jid].detach().cpu().item())
             q_lo = float(dof_lower[jid].detach().cpu().item())
             q_hi = float(dof_upper[jid].detach().cpu().item())
-            jname = right_joint_names[sel]
+            jname = right_control_joint_names[sel]
             lines.append(
                 f"selected_right={sel+1}:{jname} dof_id={jid} "
                 f"q_now={q_now_val:.4f} q_tgt={q_tgt_val:.4f}"
@@ -363,42 +383,50 @@ def main():
             print_init_state(env, env_results, args)
             selected_right_joint = 0
             try:
-                left_initial_q = env_results[0]["qpos"][0, left_joint_ids].detach().clone()
+                q_now = env_results[0]["qpos"]
+                action_target[:, :] = q_now[:, : env.num_actions].clone()
+                if len(left_lock_joint_ids) > 0:
+                    left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
+                    action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             except Exception:
-                left_initial_q = None
+                action_target[:, :] = zero_action
+                left_lock_initial_q = None
             continue
 
         delta = 0.0
-        if teleop_enabled and len(right_joint_ids) > 0:
-            if key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6"), ord("7")):
-                selected_right_joint = int(chr(key)) - 1
-                selected_right_joint = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
+        if teleop_enabled and len(right_control_joint_ids) > 0:
+            if key >= ord("1") and key <= ord("9"):
+                selected_candidate = int(chr(key)) - 1
+                if selected_candidate < len(right_control_joint_ids):
+                    selected_right_joint = selected_candidate
+                else:
+                    print(f"[Teleop] key {chr(key)} has no mapped joint (total={len(right_control_joint_ids)}).")
                 sel = selected_right_joint
-                jid = right_joint_ids[sel]
+                jid = right_control_joint_ids[sel]
                 lo = float(dof_lower[jid].detach().cpu().item())
                 hi = float(dof_upper[jid].detach().cpu().item())
                 print(
-                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"[Teleop] selected right joint {sel + 1}: {right_control_joint_names[sel]} "
                     f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
                 )
             elif key == ord("u"):
                 selected_right_joint = max(0, selected_right_joint - 1)
                 sel = selected_right_joint
-                jid = right_joint_ids[sel]
+                jid = right_control_joint_ids[sel]
                 lo = float(dof_lower[jid].detach().cpu().item())
                 hi = float(dof_upper[jid].detach().cpu().item())
                 print(
-                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"[Teleop] selected right joint {sel + 1}: {right_control_joint_names[sel]} "
                     f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
                 )
             elif key == ord("i"):
-                selected_right_joint = min(len(right_joint_ids) - 1, selected_right_joint + 1)
+                selected_right_joint = min(len(right_control_joint_ids) - 1, selected_right_joint + 1)
                 sel = selected_right_joint
-                jid = right_joint_ids[sel]
+                jid = right_control_joint_ids[sel]
                 lo = float(dof_lower[jid].detach().cpu().item())
                 hi = float(dof_upper[jid].detach().cpu().item())
                 print(
-                    f"[Teleop] selected right joint {sel + 1}: {right_joint_names[sel]} "
+                    f"[Teleop] selected right joint {sel + 1}: {right_control_joint_names[sel]} "
                     f"(dof_id={jid}, range=[{lo:.4f},{hi:.4f}] rad)"
                 )
             elif key == ord("j"):
@@ -407,13 +435,13 @@ def main():
                 delta = float(args.right_joint_step)
 
             if abs(delta) > 0.0:
-                sel = int(np.clip(selected_right_joint, 0, len(right_joint_ids) - 1))
-                jid = right_joint_ids[sel]
+                sel = int(np.clip(selected_right_joint, 0, len(right_control_joint_ids) - 1))
+                jid = right_control_joint_ids[sel]
                 action_target[0, jid] = action_target[0, jid] + delta
                 if bool(args.right_joint_clip_to_limits):
                     action_target[0, jid] = torch.clamp(action_target[0, jid], dof_lower[jid], dof_upper[jid])
                 print(
-                    f"[Teleop] {right_joint_names[sel]} -> "
+                    f"[Teleop] {right_control_joint_names[sel]} -> "
                     f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
                 )
 
