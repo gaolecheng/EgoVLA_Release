@@ -263,7 +263,7 @@ def main():
     env_cfg.spawn_background = bool(args.spawn_background)
     env_cfg.room_idx = int(args.room_idx)
     env_cfg.table_idx = int(args.table_idx)
-    env_cfg.episode_length_s = 120
+    env_cfg.episode_length_s = 1200
 
     apply_env_overrides(env_cfg, args)
 
@@ -308,6 +308,9 @@ def main():
     selected_right_joint = 0
     teleop_enabled = bool(args.enable_right_joint_teleop)
     left_lock_initial_q = None
+    all_joint_names = list(getattr(env.robot, "joint_names", []))
+    if len(all_joint_names) < env.num_actions:
+        all_joint_names = all_joint_names + [f"joint_{i}" for i in range(len(all_joint_names), env.num_actions)]
     try:
         q_now = env_results[0]["qpos"]
         action_target[:, :] = q_now[:, : env.num_actions].clone()
@@ -318,10 +321,31 @@ def main():
         action_target[:, :] = zero_action
         left_lock_initial_q = None
 
+    def print_all_joint_values():
+        try:
+            q_now_vec = env_results[0]["qpos"][0].detach().cpu()
+        except Exception:
+            q_now_vec = env.robot.data.joint_pos[0].detach().cpu()
+        q_tgt_vec = action_target[0].detach().cpu()
+        n = min(int(env.num_actions), int(q_now_vec.shape[0]), int(q_tgt_vec.shape[0]))
+        print("[Teleop] ===== All Joint Values =====")
+        for j in range(n):
+            name = all_joint_names[j] if j < len(all_joint_names) else f"joint_{j}"
+            q_now_j = float(q_now_vec[j].item())
+            q_tgt_j = float(q_tgt_vec[j].item())
+            lo = float(dof_lower[j].detach().cpu().item())
+            hi = float(dof_upper[j].detach().cpu().item())
+            print(
+                f"[Teleop] {j:02d}:{name} "
+                f"q_now={q_now_j:.6f} q_tgt={q_tgt_j:.6f} "
+                f"range=[{lo:.6f},{hi:.6f}]"
+            )
+        print("[Teleop] ============================")
+
     window_name = "Teleop Fixed RGB (Right Joint Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    print("[Teleop] Ready. Q/Esc quit, N reset scene.")
+    print("[Teleop] Ready. Q/Esc quit, N reset scene, P print all joints.")
     if teleop_enabled:
         print("[Teleop] Right joint control ON: 1-9 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
         print("[Teleop] Right control joints (arm + finger), limits in rad from articulation/USD:")
@@ -347,7 +371,7 @@ def main():
         lines = [
             "No-warmup mode: USD reset pose kept",
             f"right_joint_teleop={int(teleop_enabled)}",
-            "Keys: N reset | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
+            "Keys: N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
         if "object_pose" in env_results[0]:
@@ -391,6 +415,9 @@ def main():
             except Exception:
                 action_target[:, :] = zero_action
                 left_lock_initial_q = None
+            continue
+        if key in (ord("p"), ord("P")):
+            print_all_joint_values()
             continue
 
         delta = 0.0
