@@ -592,6 +592,7 @@ def main():
                     f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
                 )
         pose_step = float(args.pose_pos_step)
+        pose_key_cmd_this_frame = False
         if teleop_enabled and control_mode == "pose":
             pose_delta = np.zeros((3,), dtype=np.float64)
             if key in (ord("w"), ord("W")):
@@ -608,6 +609,7 @@ def main():
                 pose_delta[2] -= pose_step
             if float(np.linalg.norm(pose_delta)) > 0.0:
                 pose_right_tcp_target[0:3] = pose_right_tcp_target[0:3] + pose_delta
+                pose_key_cmd_this_frame = True
                 print(
                     "[Teleop] right_tcp_target xyz -> "
                     f"({pose_right_tcp_target[0]:.4f}, {pose_right_tcp_target[1]:.4f}, {pose_right_tcp_target[2]:.4f})"
@@ -616,26 +618,31 @@ def main():
         if teleop_enabled and control_mode == "joint":
             env_results = env.step(action_target)
         elif teleop_enabled and control_mode == "pose":
-            # Pose teleop: track tcp target via IK every step (physics ON).
-            ik_step(
-                env,
-                left_ik_controller,
-                right_ik_controller,
-                left_ik_commands_world,
-                right_ik_commands_world,
-                left_ik_commands_robot,
-                right_ik_commands_robot,
-                pose_left_tcp_target,
-                pose_right_tcp_target,
-                left_hand_dof_zeros,
-                right_hand_dof_zeros,
-                action_target,
-                ignore_orientation=bool(args.ik_ignore_orientation),
-                active_arm=ik_active_arm,
-                tcp_offset_enable=bool(args.ik_tcp_offset_enable),
-                left_tcp_offset=left_tcp_offset,
-                right_tcp_offset=right_tcp_offset,
-            )
+            if pose_key_cmd_this_frame:
+                # Re-solve IK only when tcp target is changed by keyboard input.
+                ik_step(
+                    env,
+                    left_ik_controller,
+                    right_ik_controller,
+                    left_ik_commands_world,
+                    right_ik_commands_world,
+                    left_ik_commands_robot,
+                    right_ik_commands_robot,
+                    pose_left_tcp_target,
+                    pose_right_tcp_target,
+                    left_hand_dof_zeros,
+                    right_hand_dof_zeros,
+                    action_target,
+                    ignore_orientation=bool(args.ik_ignore_orientation),
+                    active_arm=ik_active_arm,
+                    tcp_offset_enable=bool(args.ik_tcp_offset_enable),
+                    left_tcp_offset=left_tcp_offset,
+                    right_tcp_offset=right_tcp_offset,
+                )
+                pose_hold_target[:, :] = action_target
+            else:
+                # Hold last solved joint target to avoid no-input IK drift.
+                action_target[:, :] = pose_hold_target
             # Keep left arm/hand fixed at reset pose in teleop.
             if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
                 action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
