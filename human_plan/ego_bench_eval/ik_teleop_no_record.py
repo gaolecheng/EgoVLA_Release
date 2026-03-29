@@ -380,7 +380,8 @@ def main():
     window_name = "Teleop Fixed RGB (Right Joint Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    print("[Teleop] Ready. Q/Esc quit, N reset scene, P print all joints.")
+    control_mode = "joint"
+    print("[Teleop] Ready. Q/Esc quit, N reset scene, P print all joints, M toggle joint/pose mode.")
     if teleop_enabled:
         print("[Teleop] Right joint control ON: 1-9 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
         print("[Teleop] Right control joints (arm + finger), limits in rad from articulation/USD:")
@@ -406,7 +407,8 @@ def main():
         lines = [
             "No-warmup mode: USD reset pose kept",
             f"right_joint_teleop={int(teleop_enabled)}",
-            "Keys: N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
+            f"mode={control_mode}",
+            "Keys: M toggle mode | N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
         if "object_pose" in env_results[0]:
@@ -415,7 +417,7 @@ def main():
         if hasattr(env, "goal_pos_w"):
             goal = (env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()).numpy()
             lines.append(f"goal_xyz=({goal[0]:.4f},{goal[1]:.4f},{goal[2]:.4f})")
-        if teleop_enabled and len(right_control_joint_ids) > 0:
+        if teleop_enabled and control_mode == "joint" and len(right_control_joint_ids) > 0:
             sel = int(np.clip(selected_right_joint, 0, len(right_control_joint_ids) - 1))
             jid = right_control_joint_ids[sel]
             try:
@@ -437,6 +439,21 @@ def main():
 
         if key in (ord("q"), 27):
             break
+        if key in (ord("m"), ord("M")):
+            if control_mode == "joint":
+                control_mode = "pose"
+                try:
+                    q_now = env_results[0]["qpos"]
+                    action_target[:, :] = q_now[:, : env.num_actions].clone()
+                except Exception:
+                    pass
+                if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+                    action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
+                print("[Teleop] entered POSE control mode. No pose command will be sent yet.")
+            else:
+                control_mode = "joint"
+                print("[Teleop] switched back to JOINT control mode.")
+            continue
         if key == ord("n"):
             env_results = env.reset()
             print_init_state(env, env_results, args)
@@ -458,7 +475,7 @@ def main():
             continue
 
         delta = 0.0
-        if teleop_enabled and len(right_control_joint_ids) > 0:
+        if teleop_enabled and control_mode == "joint" and len(right_control_joint_ids) > 0:
             if key >= ord("1") and key <= ord("9"):
                 selected_candidate = int(chr(key)) - 1
                 if selected_candidate < len(right_control_joint_ids):
@@ -509,7 +526,17 @@ def main():
                     f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
                 )
 
-        if teleop_enabled:
+        if teleop_enabled and control_mode == "joint":
+            env_results = env.step(action_target)
+        elif teleop_enabled and control_mode == "pose":
+            # Hold current joint values in pose mode until explicit pose-control logic is added.
+            try:
+                q_now = env_results[0]["qpos"]
+                action_target[:, :] = q_now[:, : env.num_actions].clone()
+            except Exception:
+                pass
+            if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+                action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             env_results = env.step(action_target)
         elif bool(args.freeze_after_reset):
             simulation_app.update()
