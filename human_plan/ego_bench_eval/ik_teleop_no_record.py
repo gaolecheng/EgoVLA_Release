@@ -411,6 +411,8 @@ def main():
             "Keys: M toggle mode | N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
+        if control_mode == "pose":
+            lines.append("pose mode is passive: no command sent, no physics step")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
@@ -529,15 +531,9 @@ def main():
         if teleop_enabled and control_mode == "joint":
             env_results = env.step(action_target)
         elif teleop_enabled and control_mode == "pose":
-            # Hold current joint values in pose mode until explicit pose-control logic is added.
-            try:
-                q_now = env_results[0]["qpos"]
-                action_target[:, :] = q_now[:, : env.num_actions].clone()
-            except Exception:
-                pass
-            if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
-                action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
-            env_results = env.step(action_target)
+            # Passive pose mode for validation: do not send any command and do not step physics.
+            # This guarantees "nothing moves" until pose-control logic is explicitly implemented.
+            simulation_app.update()
         elif bool(args.freeze_after_reset):
             simulation_app.update()
         else:
