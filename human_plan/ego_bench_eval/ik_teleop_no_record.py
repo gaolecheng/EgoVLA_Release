@@ -354,7 +354,6 @@ def main():
     left_ik_commands_robot = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
     right_ik_commands_robot = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
     left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-    ee_needs_sync = False
 
     left_lock_joint_ids = []
     for jid in left_arm_joint_ids + left_hand_joint_ids:
@@ -399,7 +398,13 @@ def main():
             q_now_vec = env_results[0]["qpos"][0].detach().cpu()
         except Exception:
             q_now_vec = env.robot.data.joint_pos[0].detach().cpu()
-        q_tgt_vec = action_target[0].detach().cpu()
+        q_tgt_vec = action_target[0].detach().cpu().clone()
+        try:
+            manual_mask_cpu = manual_override_mask.detach().cpu()
+            if manual_mask_cpu.shape[0] == q_tgt_vec.shape[0]:
+                q_tgt_vec[~manual_mask_cpu] = q_now_vec[~manual_mask_cpu]
+        except Exception:
+            pass
         n = min(int(env.num_actions), int(q_now_vec.shape[0]), int(q_tgt_vec.shape[0]))
         print("[Teleop] ===== All Joint Values =====")
         for j in range(n):
@@ -486,8 +491,6 @@ def main():
         else:
             lines.append("EE keys: W/S +/-X | A/D +/-Y | R/F +/-Z")
             lines.append(f"ee_step={float(args.ee_pos_step):.4f}m | tcp_offset={int(bool(args.ik_tcp_offset_enable))}")
-            if ee_needs_sync:
-                lines.append("ee_target_sync_pending=1 (first EE key will sync to current pose)")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
@@ -505,11 +508,11 @@ def main():
                 q_tgt_val = float(manual_override_values[jid].detach().cpu().item())
                 tgt_tag = "manual"
             else:
-                q_tgt_val = float(action_target[0, jid].detach().cpu().item())
+                q_tgt_val = q_now_val
                 tgt_tag = "auto"
             q_lo = float(dof_lower[jid].detach().cpu().item())
             q_hi = float(dof_upper[jid].detach().cpu().item())
-            jname = right_control_joint_names[sel]
+            jname = all_joint_names[jid] if jid < len(all_joint_names) else right_control_joint_names[sel]
             lines.append(
                 f"selected_right={sel+1}:{jname} dof_id={jid} "
                 f"q_now={q_now_val:.4f} q_tgt={q_tgt_val:.4f} ({tgt_tag})"
@@ -562,10 +565,10 @@ def main():
                 current_control_mode = "ee_xyz"
                 left_ik_controller.reset()
                 right_ik_controller.reset()
-                ee_needs_sync = True
+                left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
                 print(
                     "[Teleop] mode switched to EE_XYZ. "
-                    f"right_target_tcp_hold=({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
+                    f"right_target_tcp_sync=({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
                 )
             continue
         if key == ord("n"):
@@ -588,7 +591,6 @@ def main():
             left_ik_controller.reset()
             right_ik_controller.reset()
             left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-            ee_needs_sync = False
             continue
         if key in (ord("p"), ord("P")):
             print_all_joint_values()
@@ -661,34 +663,16 @@ def main():
         if ee_mode_active and right_target_pose is not None:
             delta_xyz = np.zeros((3,), dtype=np.float64)
             if key in (ord("w"), ord("W")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[0] += float(args.ee_pos_step)
             elif key in (ord("s"), ord("S")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[0] -= float(args.ee_pos_step)
             elif key in (ord("a"), ord("A")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[1] += float(args.ee_pos_step)
             elif key in (ord("d"), ord("D")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[1] -= float(args.ee_pos_step)
             elif key in (ord("r"), ord("R")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[2] += float(args.ee_pos_step)
             elif key in (ord("f"), ord("F")):
-                if ee_needs_sync:
-                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
-                    ee_needs_sync = False
                 delta_xyz[2] -= float(args.ee_pos_step)
             if float(np.linalg.norm(delta_xyz)) > 0.0:
                 right_target_pose[0:3] = right_target_pose[0:3] + delta_xyz
@@ -723,6 +707,7 @@ def main():
                 try:
                     q_now = env_results[0]["qpos"]
                     action_target[:, :] = q_now[:, : env.num_actions].clone()
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
                 except Exception:
                     pass
             if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
