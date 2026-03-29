@@ -320,6 +320,7 @@ def main():
     except Exception:
         action_target[:, :] = zero_action
         left_lock_initial_q = None
+    pose_hold_target = action_target.clone()
 
     def print_all_joint_values():
         try:
@@ -412,7 +413,7 @@ def main():
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
         if control_mode == "pose":
-            lines.append("pose mode is passive: no command sent, no physics step")
+            lines.append("pose mode: physics ON, holding captured joint target")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
@@ -446,12 +447,13 @@ def main():
                 control_mode = "pose"
                 try:
                     q_now = env_results[0]["qpos"]
-                    action_target[:, :] = q_now[:, : env.num_actions].clone()
+                    pose_hold_target[:, :] = q_now[:, : env.num_actions].clone()
                 except Exception:
                     pass
                 if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
-                    action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
-                print("[Teleop] entered POSE control mode. No pose command will be sent yet.")
+                    pose_hold_target[0, left_lock_joint_ids] = left_lock_initial_q.to(pose_hold_target.dtype)
+                action_target[:, :] = pose_hold_target
+                print("[Teleop] entered POSE control mode. Holding captured joint target with physics ON.")
             else:
                 control_mode = "joint"
                 print("[Teleop] switched back to JOINT control mode.")
@@ -466,9 +468,11 @@ def main():
                 if len(left_lock_joint_ids) > 0:
                     left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
                     action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
+                pose_hold_target[:, :] = action_target
             except Exception:
                 action_target[:, :] = zero_action
                 left_lock_initial_q = None
+                pose_hold_target[:, :] = action_target
             continue
         if key in (ord("p"), ord("P")):
             print_all_joint_values()
@@ -531,9 +535,9 @@ def main():
         if teleop_enabled and control_mode == "joint":
             env_results = env.step(action_target)
         elif teleop_enabled and control_mode == "pose":
-            # Passive pose mode for validation: do not send any command and do not step physics.
-            # This guarantees "nothing moves" until pose-control logic is explicitly implemented.
-            simulation_app.update()
+            # Active hold: keep sending captured joint target while physics is running.
+            action_target[:, :] = pose_hold_target
+            env_results = env.step(action_target)
         elif bool(args.freeze_after_reset):
             simulation_app.update()
         else:
