@@ -79,7 +79,7 @@ def overlay_info(frame_rgb: np.ndarray, lines: list[str]) -> np.ndarray:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="No-warmup teleop checker with optional right-arm joint control."
+        description="No-warmup teleop checker with right-arm joint or EE-XYZ control."
     )
     parser.add_argument("--task", type=str, default="Humanoid-Push-Box-v0")
     parser.add_argument("--room_idx", type=int, default=1)
@@ -90,9 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", type=int, default=0)
     parser.add_argument("--loop_hz", type=float, default=30.0)
     parser.add_argument("--freeze_after_reset", type=int, default=1, help="1=hold reset frame, 0=step with zero action")
+    parser.add_argument("--teleop_mode", type=str, default="ee_xyz", choices=["joint", "ee_xyz", "hybrid"], help="initial mode: ee_xyz or joint; press M at runtime to switch")
     parser.add_argument("--enable_right_joint_teleop", type=int, default=1, help="1=enable keyboard teleop for right arm joint targets")
     parser.add_argument("--right_joint_step", type=float, default=0.02, help="right-arm joint increment in rad")
     parser.add_argument("--right_joint_clip_to_limits", type=int, default=1, help="clip right joint target to dof limits")
+    parser.add_argument("--ee_pos_step", type=float, default=0.006, help="right gripper xyz step in meters for ee_xyz mode")
 
     parser.add_argument("--left_ee_body_name", type=str, default="left_arm_link7")
     parser.add_argument("--right_ee_body_name", type=str, default="right_arm_link7")
@@ -256,6 +258,8 @@ def main():
 
     import gymnasium as gym
     from omni.isaac.lab_tasks.utils import parse_env_cfg
+    from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
+    from human_plan.ego_bench_eval.utils import ik_step
     from humanoid.tasks.base_env import BaseEnv, BaseEnvCfg
 
     env_cfg: BaseEnvCfg = parse_env_cfg(args.task, num_envs=1)
@@ -270,8 +274,37 @@ def main():
     env: BaseEnv = gym.make(args.task, cfg=env_cfg)
     maybe_apply_benchmark_randomize_idx(env, args)
 
+    teleop_mode = str(args.teleop_mode).strip().lower()
+    if teleop_mode == "hybrid":
+        # Backward compatibility: old "hybrid" now starts in ee_xyz and toggles with M.
+        teleop_mode = "ee_xyz"
+    if teleop_mode not in ("joint", "ee_xyz"):
+        teleop_mode = "ee_xyz"
+    current_control_mode = teleop_mode
+    joint_teleop_enabled = bool(args.enable_right_joint_teleop)
+
+    ik_active_arm = str(args.ik_active_arm).strip().lower()
+    if bool(args.right_only_mode):
+        ik_active_arm = "right"
+    if ik_active_arm not in ("both", "left", "right"):
+        ik_active_arm = "right"
+
+    left_tcp_offset = (
+        float(args.ik_left_tcp_offset_x),
+        float(args.ik_left_tcp_offset_y),
+        float(args.ik_left_tcp_offset_z),
+    )
+    right_tcp_offset = (
+        float(args.ik_right_tcp_offset_x),
+        float(args.ik_right_tcp_offset_y),
+        float(args.ik_right_tcp_offset_z),
+    )
+
     print("[Teleop] preserve_usd_initial_ee=1 behavior is enforced in this script.")
-    print("[Teleop] NO init_poses warmup, NO IK tracking.")
+    print("[Teleop] NO init_poses warmup.")
+    print(f"[Teleop] initial_mode={current_control_mode} (press M to switch) | ik_tcp_offset_enable={int(bool(args.ik_tcp_offset_enable))}")
+    if bool(args.ik_tcp_offset_enable):
+        print(f"[Teleop] tcp offsets: left={left_tcp_offset}, right={right_tcp_offset}")
 
     env_results = env.reset()
     print_init_state(env, env_results, args)
@@ -285,6 +318,42 @@ def main():
     left_hand_joint_ids = [int(x) for x in getattr(env.cfg.left_hand_cfg, "joint_ids", [])]
     right_arm_joint_ids = [int(x) for x in env.cfg.right_arm_cfg.joint_ids]
     right_hand_joint_ids = [int(x) for x in getattr(env.cfg.right_hand_cfg, "joint_ids", [])]
+
+    left_hand_dof_zeros = np.zeros((len(left_hand_joint_ids),), dtype=np.float32)
+    right_hand_dof_zeros = np.zeros((len(right_hand_joint_ids),), dtype=np.float32)
+
+    left_ik_controller = None
+    right_ik_controller = None
+    left_ik_commands_world = None
+    right_ik_commands_world = None
+    left_ik_commands_robot = None
+    right_ik_commands_robot = None
+    left_target_pose = None
+    right_target_pose = None
+
+    def build_current_targets_from_env(curr_env_results):
+        left_link = curr_env_results[0]["left_ee_pose"][0].detach().cpu().numpy().copy()
+        right_link = curr_env_results[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
+        left_link[3:7] = quat_wxyz_normalize(left_link[3:7])
+        right_link[3:7] = quat_wxyz_normalize(right_link[3:7])
+        if bool(args.ik_tcp_offset_enable):
+            left_target = ee_link_pose_to_tcp_pose(left_link, left_tcp_offset)
+            right_target = ee_link_pose_to_tcp_pose(right_link, right_tcp_offset)
+        else:
+            left_target = left_link
+            right_target = right_link
+        return left_target, right_target
+
+    command_type = "pose"
+    left_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
+    right_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
+    left_ik_controller = DifferentialIKController(left_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
+    right_ik_controller = DifferentialIKController(right_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
+    left_ik_commands_world = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
+    right_ik_commands_world = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
+    left_ik_commands_robot = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
+    right_ik_commands_robot = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
+    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
 
     left_lock_joint_ids = []
     for jid in left_arm_joint_ids + left_hand_joint_ids:
@@ -306,19 +375,22 @@ def main():
             right_control_joint_names.append(jname)
 
     selected_right_joint = 0
-    teleop_enabled = bool(args.enable_right_joint_teleop)
     left_lock_initial_q = None
+    manual_override_mask = torch.zeros((env.num_actions,), dtype=torch.bool, device=env.robot.device)
+    manual_override_values = torch.zeros((env.num_actions,), dtype=action_target.dtype, device=env.robot.device)
     all_joint_names = list(getattr(env.robot, "joint_names", []))
     if len(all_joint_names) < env.num_actions:
         all_joint_names = all_joint_names + [f"joint_{i}" for i in range(len(all_joint_names), env.num_actions)]
     try:
         q_now = env_results[0]["qpos"]
         action_target[:, :] = q_now[:, : env.num_actions].clone()
+        manual_override_values[:] = action_target[0, :]
         if len(left_lock_joint_ids) > 0:
             left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
             action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
     except Exception:
         action_target[:, :] = zero_action
+        manual_override_values[:] = action_target[0, :]
         left_lock_initial_q = None
 
     def print_all_joint_values():
@@ -342,23 +414,29 @@ def main():
             )
         print("[Teleop] ============================")
 
-    window_name = "Teleop Fixed RGB (Right Joint Mode)"
+    window_name = "Teleop Fixed RGB (Right Joint / EE-XYZ Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
-    print("[Teleop] Ready. Q/Esc quit, N reset scene, P print all joints.")
-    if teleop_enabled:
-        print("[Teleop] Right joint control ON: 1-9 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
+    print("[Teleop] Ready. Q/Esc quit, N reset, P print joints, M toggle mode.")
+    print("[Teleop] Mode ee_xyz: W/S +/-X, A/D +/-Y, R/F +/-Z.")
+    if joint_teleop_enabled:
+        print("[Teleop] Mode joint: 1-9/U/I select, J/K dec/inc, C clear joint overrides.")
         print("[Teleop] Right control joints (arm + finger), limits in rad from articulation/USD:")
         for idx, jid in enumerate(right_control_joint_ids):
             lo = float(dof_lower[jid].detach().cpu().item())
             hi = float(dof_upper[jid].detach().cpu().item())
             print(f"  - {idx + 1}:{right_control_joint_names[idx]} (dof_id={jid}) in [{lo:.4f}, {hi:.4f}]")
-        if left_lock_initial_q is not None:
-            print("[Teleop] Left arm+hand are locked to reset initial joint values.")
     else:
-        print("[Teleop] Right joint control OFF (enable with --enable_right_joint_teleop 1).")
+        print("[Teleop] Joint mode keyboard edits are disabled by --enable_right_joint_teleop 0.")
+    if left_lock_initial_q is not None:
+        print("[Teleop] Left arm+hand are locked to reset initial joint values.")
+    print(f"[Teleop] IK active_arm={ik_active_arm}, ignore_orientation={int(bool(args.ik_ignore_orientation))}")
+    print(f"[Teleop] Current mode: {current_control_mode}")
+
     while simulation_app.is_running():
         tic = time.time()
+        joint_mode_active = current_control_mode == "joint"
+        ee_mode_active = current_control_mode == "ee_xyz"
 
         rgb_obs = env_results[0]["fixed_rgb"][0].detach().cpu().numpy()
         rgb_obs = to_uint8_rgb(rgb_obs)
@@ -370,38 +448,76 @@ def main():
 
         lines = [
             "No-warmup mode: USD reset pose kept",
-            f"right_joint_teleop={int(teleop_enabled)}",
-            "Keys: N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
+            f"mode={current_control_mode} (M to toggle)",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
+        if joint_mode_active:
+            lines.append("Joint keys: 1-9/U/I select | J/K dec/inc | C clear joint overrides")
+            lines.append(f"right_joint_teleop={int(joint_teleop_enabled)}")
+        else:
+            lines.append("EE keys: W/S +/-X | A/D +/-Y | R/F +/-Z")
+            lines.append(f"ee_step={float(args.ee_pos_step):.4f}m | tcp_offset={int(bool(args.ik_tcp_offset_enable))}")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
         if hasattr(env, "goal_pos_w"):
             goal = (env.goal_pos_w[0].detach().cpu() - env.scene.env_origins[0].detach().cpu()).numpy()
             lines.append(f"goal_xyz=({goal[0]:.4f},{goal[1]:.4f},{goal[2]:.4f})")
-        if teleop_enabled and len(right_control_joint_ids) > 0:
+        if joint_mode_active and joint_teleop_enabled and len(right_control_joint_ids) > 0:
             sel = int(np.clip(selected_right_joint, 0, len(right_control_joint_ids) - 1))
             jid = right_control_joint_ids[sel]
             try:
                 q_now_val = float(env_results[0]["qpos"][0, jid].detach().cpu().item())
             except Exception:
                 q_now_val = float("nan")
-            q_tgt_val = float(action_target[0, jid].detach().cpu().item())
+            if bool(manual_override_mask[jid].item()):
+                q_tgt_val = float(manual_override_values[jid].detach().cpu().item())
+                tgt_tag = "manual"
+            else:
+                q_tgt_val = float(action_target[0, jid].detach().cpu().item())
+                tgt_tag = "auto"
             q_lo = float(dof_lower[jid].detach().cpu().item())
             q_hi = float(dof_upper[jid].detach().cpu().item())
             jname = right_control_joint_names[sel]
             lines.append(
                 f"selected_right={sel+1}:{jname} dof_id={jid} "
-                f"q_now={q_now_val:.4f} q_tgt={q_tgt_val:.4f}"
+                f"q_now={q_now_val:.4f} q_tgt={q_tgt_val:.4f} ({tgt_tag})"
             )
             lines.append(f"selected_range=[{q_lo:.4f}, {q_hi:.4f}] rad")
+        if ee_mode_active and right_target_pose is not None:
+            lines.append(
+                "right_target_tcp_xyz="
+                f"({right_target_pose[0]:.4f},{right_target_pose[1]:.4f},{right_target_pose[2]:.4f})"
+            )
         vis = overlay_info(rgb_obs, lines)
         cv2.imshow(window_name, vis[:, :, ::-1])
         key = cv2.waitKey(1) & 0xFF
 
         if key in (ord("q"), 27):
             break
+        if key in (ord("m"), ord("M")):
+            if current_control_mode == "ee_xyz":
+                current_control_mode = "joint"
+                try:
+                    q_now = env_results[0]["qpos"]
+                    action_target[:, :] = q_now[:, : env.num_actions].clone()
+                    manual_override_values[:] = action_target[0, :]
+                    manual_override_mask[:] = False
+                except Exception:
+                    action_target[:, :] = zero_action
+                    manual_override_values[:] = action_target[0, :]
+                    manual_override_mask[:] = False
+                print("[Teleop] mode switched to JOINT.")
+            else:
+                current_control_mode = "ee_xyz"
+                left_ik_controller.reset()
+                right_ik_controller.reset()
+                left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                print(
+                    "[Teleop] mode switched to EE_XYZ. "
+                    f"right_target_tcp=({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
+                )
+            continue
         if key == ord("n"):
             env_results = env.reset()
             print_init_state(env, env_results, args)
@@ -409,19 +525,26 @@ def main():
             try:
                 q_now = env_results[0]["qpos"]
                 action_target[:, :] = q_now[:, : env.num_actions].clone()
+                manual_override_values[:] = action_target[0, :]
+                manual_override_mask[:] = False
                 if len(left_lock_joint_ids) > 0:
                     left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
                     action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             except Exception:
                 action_target[:, :] = zero_action
+                manual_override_values[:] = action_target[0, :]
+                manual_override_mask[:] = False
                 left_lock_initial_q = None
+            left_ik_controller.reset()
+            right_ik_controller.reset()
+            left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
             continue
         if key in (ord("p"), ord("P")):
             print_all_joint_values()
             continue
 
         delta = 0.0
-        if teleop_enabled and len(right_control_joint_ids) > 0:
+        if joint_mode_active and joint_teleop_enabled and len(right_control_joint_ids) > 0:
             if key >= ord("1") and key <= ord("9"):
                 selected_candidate = int(chr(key)) - 1
                 if selected_candidate < len(right_control_joint_ids):
@@ -460,19 +583,77 @@ def main():
                 delta = -float(args.right_joint_step)
             elif key == ord("k"):
                 delta = float(args.right_joint_step)
+            elif key in (ord("c"), ord("C")):
+                manual_override_mask[:] = False
+                print("[Teleop] cleared all right-joint manual overrides.")
 
             if abs(delta) > 0.0:
                 sel = int(np.clip(selected_right_joint, 0, len(right_control_joint_ids) - 1))
                 jid = right_control_joint_ids[sel]
-                action_target[0, jid] = action_target[0, jid] + delta
+                if bool(manual_override_mask[jid].item()):
+                    base_val = manual_override_values[jid]
+                else:
+                    base_val = action_target[0, jid]
+                new_val = base_val + delta
                 if bool(args.right_joint_clip_to_limits):
-                    action_target[0, jid] = torch.clamp(action_target[0, jid], dof_lower[jid], dof_upper[jid])
+                    new_val = torch.clamp(new_val, dof_lower[jid], dof_upper[jid])
+                manual_override_values[jid] = new_val
+                manual_override_mask[jid] = True
+                action_target[0, jid] = new_val
                 print(
-                    f"[Teleop] {right_control_joint_names[sel]} -> "
-                    f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
+                    f"[Teleop] {right_control_joint_names[sel]} manual -> "
+                    f"{float(manual_override_values[jid].detach().cpu().item()):.4f} rad"
                 )
 
-        if teleop_enabled:
+        if ee_mode_active and right_target_pose is not None:
+            delta_xyz = np.zeros((3,), dtype=np.float64)
+            if key in (ord("w"), ord("W")):
+                delta_xyz[0] += float(args.ee_pos_step)
+            elif key in (ord("s"), ord("S")):
+                delta_xyz[0] -= float(args.ee_pos_step)
+            elif key in (ord("a"), ord("A")):
+                delta_xyz[1] += float(args.ee_pos_step)
+            elif key in (ord("d"), ord("D")):
+                delta_xyz[1] -= float(args.ee_pos_step)
+            elif key in (ord("r"), ord("R")):
+                delta_xyz[2] += float(args.ee_pos_step)
+            elif key in (ord("f"), ord("F")):
+                delta_xyz[2] -= float(args.ee_pos_step)
+            if float(np.linalg.norm(delta_xyz)) > 0.0:
+                right_target_pose[0:3] = right_target_pose[0:3] + delta_xyz
+                print(
+                    "[Teleop] right_target_tcp xyz -> "
+                    f"({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
+                )
+
+        if ee_mode_active and right_target_pose is not None:
+            ik_step(
+                env,
+                left_ik_controller,
+                right_ik_controller,
+                left_ik_commands_world,
+                right_ik_commands_world,
+                left_ik_commands_robot,
+                right_ik_commands_robot,
+                left_target_pose,
+                right_target_pose,
+                left_hand_dof_zeros,
+                right_hand_dof_zeros,
+                action_target,
+                ignore_orientation=bool(args.ik_ignore_orientation),
+                active_arm=ik_active_arm,
+                tcp_offset_enable=bool(args.ik_tcp_offset_enable),
+                left_tcp_offset=left_tcp_offset,
+                right_tcp_offset=right_tcp_offset,
+            )
+            if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+                action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
+            env_results = env.step(action_target)
+        elif joint_mode_active:
+            if len(right_control_joint_ids) > 0:
+                action_target[0, manual_override_mask] = manual_override_values[manual_override_mask]
+            if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+                action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             env_results = env.step(action_target)
         elif bool(args.freeze_after_reset):
             simulation_app.update()
