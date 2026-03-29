@@ -353,6 +353,30 @@ def main():
         except Exception as e:
             print(f"[Teleop] right_ee_pose print failed: {e}")
 
+    def print_right_tcp_pose():
+        try:
+            pose = env_results[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
+            pose[3:7] = quat_wxyz_normalize(pose[3:7])
+            if bool(args.ik_tcp_offset_enable):
+                tcp = ee_link_pose_to_tcp_pose(
+                    pose,
+                    (args.ik_right_tcp_offset_x, args.ik_right_tcp_offset_y, args.ik_right_tcp_offset_z),
+                )
+                print(
+                    "[Teleop] right_tcp_pose(x,y,z,w,x,y,z)="
+                    f"({tcp[0]:.6f}, {tcp[1]:.6f}, {tcp[2]:.6f}, "
+                    f"{tcp[3]:.6f}, {tcp[4]:.6f}, {tcp[5]:.6f}, {tcp[6]:.6f})"
+                )
+            else:
+                print("[Teleop] ik_tcp_offset_enable=0, right_tcp_pose == right_ee_pose.")
+                print(
+                    "[Teleop] right_tcp_pose(x,y,z,w,x,y,z)="
+                    f"({pose[0]:.6f}, {pose[1]:.6f}, {pose[2]:.6f}, "
+                    f"{pose[3]:.6f}, {pose[4]:.6f}, {pose[5]:.6f}, {pose[6]:.6f})"
+                )
+        except Exception as e:
+            print(f"[Teleop] right_tcp_pose print failed: {e}")
+
     window_name = "Teleop Fixed RGB (Right Joint Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
@@ -430,6 +454,7 @@ def main():
         if key in (ord("p"), ord("P")):
             print_all_joint_values()
             print_right_ee_pose()
+            print_right_tcp_pose()
             continue
 
         delta = 0.0
