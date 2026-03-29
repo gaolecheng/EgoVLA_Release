@@ -354,6 +354,7 @@ def main():
     left_ik_commands_robot = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
     right_ik_commands_robot = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
     left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+    ee_needs_sync = False
 
     left_lock_joint_ids = []
     for jid in left_arm_joint_ids + left_hand_joint_ids:
@@ -414,6 +415,34 @@ def main():
             )
         print("[Teleop] ============================")
 
+    def print_right_tcp_compare():
+        if right_target_pose is None:
+            print("[Teleop] right_target_tcp is not initialized.")
+            return
+        try:
+            right_link_curr = env_results[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
+            right_link_curr[3:7] = quat_wxyz_normalize(right_link_curr[3:7])
+            if bool(args.ik_tcp_offset_enable):
+                right_tcp_curr = ee_link_pose_to_tcp_pose(right_link_curr, right_tcp_offset)
+            else:
+                right_tcp_curr = right_link_curr
+            tcp_err = right_target_pose[0:3] - right_tcp_curr[0:3]
+            print(
+                "[Teleop] right_tcp_curr_xyz="
+                f"({right_tcp_curr[0]:.4f}, {right_tcp_curr[1]:.4f}, {right_tcp_curr[2]:.4f})"
+            )
+            print(
+                "[Teleop] right_target_tcp_xyz="
+                f"({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
+            )
+            print(
+                "[Teleop] right_tcp_err_xyz="
+                f"({tcp_err[0]:+.4f}, {tcp_err[1]:+.4f}, {tcp_err[2]:+.4f}) "
+                f"|err|={float(np.linalg.norm(tcp_err)):.4f}m"
+            )
+        except Exception as e:
+            print(f"[Teleop] right tcp compare failed: {e}")
+
     window_name = "Teleop Fixed RGB (Right Joint / EE-XYZ Mode)"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
@@ -457,6 +486,8 @@ def main():
         else:
             lines.append("EE keys: W/S +/-X | A/D +/-Y | R/F +/-Z")
             lines.append(f"ee_step={float(args.ee_pos_step):.4f}m | tcp_offset={int(bool(args.ik_tcp_offset_enable))}")
+            if ee_needs_sync:
+                lines.append("ee_target_sync_pending=1 (first EE key will sync to current pose)")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
@@ -485,6 +516,25 @@ def main():
             )
             lines.append(f"selected_range=[{q_lo:.4f}, {q_hi:.4f}] rad")
         if ee_mode_active and right_target_pose is not None:
+            try:
+                right_link_curr = env_results[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
+                right_link_curr[3:7] = quat_wxyz_normalize(right_link_curr[3:7])
+                if bool(args.ik_tcp_offset_enable):
+                    right_tcp_curr = ee_link_pose_to_tcp_pose(right_link_curr, right_tcp_offset)
+                else:
+                    right_tcp_curr = right_link_curr
+                tcp_err = right_target_pose[0:3] - right_tcp_curr[0:3]
+                lines.append(
+                    "right_tcp_curr_xyz="
+                    f"({right_tcp_curr[0]:.4f},{right_tcp_curr[1]:.4f},{right_tcp_curr[2]:.4f})"
+                )
+                lines.append(
+                    "right_tcp_err_xyz="
+                    f"({tcp_err[0]:+.4f},{tcp_err[1]:+.4f},{tcp_err[2]:+.4f}) "
+                    f"|err|={float(np.linalg.norm(tcp_err)):.4f}m"
+                )
+            except Exception:
+                lines.append("right_tcp_curr_xyz=N/A")
             lines.append(
                 "right_target_tcp_xyz="
                 f"({right_target_pose[0]:.4f},{right_target_pose[1]:.4f},{right_target_pose[2]:.4f})"
@@ -512,10 +562,10 @@ def main():
                 current_control_mode = "ee_xyz"
                 left_ik_controller.reset()
                 right_ik_controller.reset()
-                left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                ee_needs_sync = True
                 print(
                     "[Teleop] mode switched to EE_XYZ. "
-                    f"right_target_tcp=({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
+                    f"right_target_tcp_hold=({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
                 )
             continue
         if key == ord("n"):
@@ -538,12 +588,15 @@ def main():
             left_ik_controller.reset()
             right_ik_controller.reset()
             left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+            ee_needs_sync = False
             continue
         if key in (ord("p"), ord("P")):
             print_all_joint_values()
+            print_right_tcp_compare()
             continue
 
         delta = 0.0
+        ee_key_cmd_this_frame = False
         if joint_mode_active and joint_teleop_enabled and len(right_control_joint_ids) > 0:
             if key >= ord("1") and key <= ord("9"):
                 selected_candidate = int(chr(key)) - 1
@@ -608,44 +661,70 @@ def main():
         if ee_mode_active and right_target_pose is not None:
             delta_xyz = np.zeros((3,), dtype=np.float64)
             if key in (ord("w"), ord("W")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[0] += float(args.ee_pos_step)
             elif key in (ord("s"), ord("S")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[0] -= float(args.ee_pos_step)
             elif key in (ord("a"), ord("A")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[1] += float(args.ee_pos_step)
             elif key in (ord("d"), ord("D")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[1] -= float(args.ee_pos_step)
             elif key in (ord("r"), ord("R")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[2] += float(args.ee_pos_step)
             elif key in (ord("f"), ord("F")):
+                if ee_needs_sync:
+                    left_target_pose, right_target_pose = build_current_targets_from_env(env_results)
+                    ee_needs_sync = False
                 delta_xyz[2] -= float(args.ee_pos_step)
             if float(np.linalg.norm(delta_xyz)) > 0.0:
                 right_target_pose[0:3] = right_target_pose[0:3] + delta_xyz
+                ee_key_cmd_this_frame = True
                 print(
                     "[Teleop] right_target_tcp xyz -> "
                     f"({right_target_pose[0]:.4f}, {right_target_pose[1]:.4f}, {right_target_pose[2]:.4f})"
                 )
 
         if ee_mode_active and right_target_pose is not None:
-            ik_step(
-                env,
-                left_ik_controller,
-                right_ik_controller,
-                left_ik_commands_world,
-                right_ik_commands_world,
-                left_ik_commands_robot,
-                right_ik_commands_robot,
-                left_target_pose,
-                right_target_pose,
-                left_hand_dof_zeros,
-                right_hand_dof_zeros,
-                action_target,
-                ignore_orientation=bool(args.ik_ignore_orientation),
-                active_arm=ik_active_arm,
-                tcp_offset_enable=bool(args.ik_tcp_offset_enable),
-                left_tcp_offset=left_tcp_offset,
-                right_tcp_offset=right_tcp_offset,
-            )
+            if ee_key_cmd_this_frame:
+                ik_step(
+                    env,
+                    left_ik_controller,
+                    right_ik_controller,
+                    left_ik_commands_world,
+                    right_ik_commands_world,
+                    left_ik_commands_robot,
+                    right_ik_commands_robot,
+                    left_target_pose,
+                    right_target_pose,
+                    left_hand_dof_zeros,
+                    right_hand_dof_zeros,
+                    action_target,
+                    ignore_orientation=bool(args.ik_ignore_orientation),
+                    active_arm=ik_active_arm,
+                    tcp_offset_enable=bool(args.ik_tcp_offset_enable),
+                    left_tcp_offset=left_tcp_offset,
+                    right_tcp_offset=right_tcp_offset,
+                )
+            else:
+                try:
+                    q_now = env_results[0]["qpos"]
+                    action_target[:, :] = q_now[:, : env.num_actions].clone()
+                except Exception:
+                    pass
             if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
                 action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             env_results = env.step(action_target)
