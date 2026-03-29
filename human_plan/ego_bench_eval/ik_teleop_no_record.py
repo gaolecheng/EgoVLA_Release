@@ -93,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable_right_joint_teleop", type=int, default=1, help="1=enable keyboard teleop for right arm joint targets")
     parser.add_argument("--right_joint_step", type=float, default=0.02, help="right-arm joint increment in rad")
     parser.add_argument("--right_joint_clip_to_limits", type=int, default=1, help="clip right joint target to dof limits")
+    parser.add_argument("--pose_pos_step", type=float, default=0.006, help="right tcp xyz increment in meters for pose mode")
 
     parser.add_argument("--left_ee_body_name", type=str, default="left_arm_link7")
     parser.add_argument("--right_ee_body_name", type=str, default="right_arm_link7")
@@ -255,7 +256,9 @@ def main():
     simulation_app = app_launcher.app
 
     import gymnasium as gym
+    from omni.isaac.lab.controllers import DifferentialIKController, DifferentialIKControllerCfg
     from omni.isaac.lab_tasks.utils import parse_env_cfg
+    from human_plan.ego_bench_eval.utils import ik_step
     from humanoid.tasks.base_env import BaseEnv, BaseEnvCfg
 
     env_cfg: BaseEnvCfg = parse_env_cfg(args.task, num_envs=1)
@@ -276,6 +279,14 @@ def main():
     env_results = env.reset()
     print_init_state(env, env_results, args)
 
+    left_tcp_offset = (args.ik_left_tcp_offset_x, args.ik_left_tcp_offset_y, args.ik_left_tcp_offset_z)
+    right_tcp_offset = (args.ik_right_tcp_offset_x, args.ik_right_tcp_offset_y, args.ik_right_tcp_offset_z)
+    ik_active_arm = str(args.ik_active_arm).strip().lower()
+    if bool(args.right_only_mode):
+        ik_active_arm = "right"
+    if ik_active_arm not in ("both", "left", "right"):
+        ik_active_arm = "right"
+
     dt = 1.0 / max(1e-3, float(args.loop_hz))
     zero_action = torch.zeros((env.scene.num_envs, env.num_actions), device=env.robot.device)
     action_target = torch.zeros((env.scene.num_envs, env.num_actions), device=env.robot.device)
@@ -285,6 +296,28 @@ def main():
     left_hand_joint_ids = [int(x) for x in getattr(env.cfg.left_hand_cfg, "joint_ids", [])]
     right_arm_joint_ids = [int(x) for x in env.cfg.right_arm_cfg.joint_ids]
     right_hand_joint_ids = [int(x) for x in getattr(env.cfg.right_hand_cfg, "joint_ids", [])]
+    left_hand_dof_zeros = np.zeros((len(left_hand_joint_ids),), dtype=np.float32)
+    right_hand_dof_zeros = np.zeros((len(right_hand_joint_ids),), dtype=np.float32)
+
+    command_type = "pose"
+    left_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
+    right_ik_cfg = DifferentialIKControllerCfg(command_type=command_type, use_relative_mode=False, ik_method="dls")
+    left_ik_controller = DifferentialIKController(left_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
+    right_ik_controller = DifferentialIKController(right_ik_cfg, num_envs=env.scene.num_envs, device=env.sim.device)
+    left_ik_commands_world = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
+    right_ik_commands_world = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
+    left_ik_commands_robot = torch.zeros(env.scene.num_envs, left_ik_controller.action_dim, device=env.robot.device)
+    right_ik_commands_robot = torch.zeros(env.scene.num_envs, right_ik_controller.action_dim, device=env.robot.device)
+
+    def get_current_left_right_tcp_pose(curr_env_results):
+        left_pose = curr_env_results[0]["left_ee_pose"][0].detach().cpu().numpy().copy()
+        right_pose = curr_env_results[0]["right_ee_pose"][0].detach().cpu().numpy().copy()
+        left_pose[3:7] = quat_wxyz_normalize(left_pose[3:7])
+        right_pose[3:7] = quat_wxyz_normalize(right_pose[3:7])
+        if bool(args.ik_tcp_offset_enable):
+            left_pose = ee_link_pose_to_tcp_pose(left_pose, left_tcp_offset)
+            right_pose = ee_link_pose_to_tcp_pose(right_pose, right_tcp_offset)
+        return left_pose, right_pose
 
     left_lock_joint_ids = []
     for jid in left_arm_joint_ids + left_hand_joint_ids:
@@ -321,6 +354,7 @@ def main():
         action_target[:, :] = zero_action
         left_lock_initial_q = None
     pose_hold_target = action_target.clone()
+    pose_left_tcp_target, pose_right_tcp_target = get_current_left_right_tcp_pose(env_results)
 
     def print_all_joint_values():
         try:
@@ -385,6 +419,7 @@ def main():
     print("[Teleop] Ready. Q/Esc quit, N reset scene, P print all joints, M toggle joint/pose mode.")
     if teleop_enabled:
         print("[Teleop] Right joint control ON: 1-9 select joint, J/K dec/inc selected joint, U/I prev/next joint.")
+        print("[Teleop] Pose mode control: W/S -> +/-X, A/D -> +/-Y, R/F -> +/-Z on right tcp.")
         print("[Teleop] Right control joints (arm + finger), limits in rad from articulation/USD:")
         for idx, jid in enumerate(right_control_joint_ids):
             lo = float(dof_lower[jid].detach().cpu().item())
@@ -409,11 +444,27 @@ def main():
             "No-warmup mode: USD reset pose kept",
             f"right_joint_teleop={int(teleop_enabled)}",
             f"mode={control_mode}",
-            "Keys: M toggle mode | N reset | P print joints | Q quit | 1-9 select | J/K dec/inc | U/I prev/next",
+            "Keys: M toggle mode | N reset | P print joints | Q quit",
             f"freeze_after_reset={int(bool(args.freeze_after_reset))}",
         ]
         if control_mode == "pose":
-            lines.append("pose mode: physics ON, holding captured joint target")
+            lines.append("pose mode: W/S +/-X | A/D +/-Y | R/F +/-Z")
+            try:
+                curr_left_tcp, curr_right_tcp = get_current_left_right_tcp_pose(env_results)
+                tcp_err = pose_right_tcp_target[:3] - curr_right_tcp[:3]
+                lines.append(
+                    f"right_tcp_curr=({curr_right_tcp[0]:.4f},{curr_right_tcp[1]:.4f},{curr_right_tcp[2]:.4f})"
+                )
+                lines.append(
+                    f"right_tcp_tgt =({pose_right_tcp_target[0]:.4f},{pose_right_tcp_target[1]:.4f},{pose_right_tcp_target[2]:.4f})"
+                )
+                lines.append(
+                    f"tcp_err=({tcp_err[0]:+.4f},{tcp_err[1]:+.4f},{tcp_err[2]:+.4f}) |err|={float(np.linalg.norm(tcp_err)):.4f}m"
+                )
+            except Exception:
+                lines.append("right tcp telemetry unavailable")
+        else:
+            lines.append("joint mode: 1-9/U/I select | J/K dec/inc")
         if "object_pose" in env_results[0]:
             box = env_results[0]["object_pose"][0].detach().cpu().numpy()
             lines.append(f"box_xyz=({box[0]:.4f},{box[1]:.4f},{box[2]:.4f})")
@@ -453,7 +504,13 @@ def main():
                 if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
                     pose_hold_target[0, left_lock_joint_ids] = left_lock_initial_q.to(pose_hold_target.dtype)
                 action_target[:, :] = pose_hold_target
-                print("[Teleop] entered POSE control mode. Holding captured joint target with physics ON.")
+                left_ik_controller.reset()
+                right_ik_controller.reset()
+                pose_left_tcp_target, pose_right_tcp_target = get_current_left_right_tcp_pose(env_results)
+                print(
+                    "[Teleop] entered POSE control mode. "
+                    f"right_tcp_target=({pose_right_tcp_target[0]:.4f}, {pose_right_tcp_target[1]:.4f}, {pose_right_tcp_target[2]:.4f})"
+                )
             else:
                 control_mode = "joint"
                 print("[Teleop] switched back to JOINT control mode.")
@@ -469,6 +526,9 @@ def main():
                     left_lock_initial_q = env_results[0]["qpos"][0, left_lock_joint_ids].detach().clone()
                     action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
                 pose_hold_target[:, :] = action_target
+                pose_left_tcp_target, pose_right_tcp_target = get_current_left_right_tcp_pose(env_results)
+                left_ik_controller.reset()
+                right_ik_controller.reset()
             except Exception:
                 action_target[:, :] = zero_action
                 left_lock_initial_q = None
@@ -531,12 +591,54 @@ def main():
                     f"[Teleop] {right_control_joint_names[sel]} -> "
                     f"{float(action_target[0, jid].detach().cpu().item()):.4f} rad"
                 )
+        pose_step = float(args.pose_pos_step)
+        if teleop_enabled and control_mode == "pose":
+            pose_delta = np.zeros((3,), dtype=np.float64)
+            if key in (ord("w"), ord("W")):
+                pose_delta[0] += pose_step
+            elif key in (ord("s"), ord("S")):
+                pose_delta[0] -= pose_step
+            elif key in (ord("a"), ord("A")):
+                pose_delta[1] += pose_step
+            elif key in (ord("d"), ord("D")):
+                pose_delta[1] -= pose_step
+            elif key in (ord("r"), ord("R")):
+                pose_delta[2] += pose_step
+            elif key in (ord("f"), ord("F")):
+                pose_delta[2] -= pose_step
+            if float(np.linalg.norm(pose_delta)) > 0.0:
+                pose_right_tcp_target[0:3] = pose_right_tcp_target[0:3] + pose_delta
+                print(
+                    "[Teleop] right_tcp_target xyz -> "
+                    f"({pose_right_tcp_target[0]:.4f}, {pose_right_tcp_target[1]:.4f}, {pose_right_tcp_target[2]:.4f})"
+                )
 
         if teleop_enabled and control_mode == "joint":
             env_results = env.step(action_target)
         elif teleop_enabled and control_mode == "pose":
-            # Active hold: keep sending captured joint target while physics is running.
-            action_target[:, :] = pose_hold_target
+            # Pose teleop: track tcp target via IK every step (physics ON).
+            ik_step(
+                env,
+                left_ik_controller,
+                right_ik_controller,
+                left_ik_commands_world,
+                right_ik_commands_world,
+                left_ik_commands_robot,
+                right_ik_commands_robot,
+                pose_left_tcp_target,
+                pose_right_tcp_target,
+                left_hand_dof_zeros,
+                right_hand_dof_zeros,
+                action_target,
+                ignore_orientation=bool(args.ik_ignore_orientation),
+                active_arm=ik_active_arm,
+                tcp_offset_enable=bool(args.ik_tcp_offset_enable),
+                left_tcp_offset=left_tcp_offset,
+                right_tcp_offset=right_tcp_offset,
+            )
+            # Keep left arm/hand fixed at reset pose in teleop.
+            if left_lock_initial_q is not None and len(left_lock_joint_ids) > 0:
+                action_target[0, left_lock_joint_ids] = left_lock_initial_q.to(action_target.dtype)
             env_results = env.step(action_target)
         elif bool(args.freeze_after_reset):
             simulation_app.update()
